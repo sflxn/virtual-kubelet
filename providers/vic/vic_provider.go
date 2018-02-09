@@ -1,30 +1,64 @@
 package vic
 
 import (
+	"golang.org/x/net/context"
+
 	"github.com/vmware/vic/lib/apiservers/engine/proxy"
+	"github.com/vmware/vic/lib/apiservers/portlayer/client"
+	"github.com/vmware/vic/lib/apiservers/portlayer/models"
+	"github.com/vmware/vic/pkg/trace"
+
+	"fmt"
 
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"k8s.io/api/core/v1"
-	"github.com/kubernetes/contrib/diurnal/Godeps/_workspace/src/golang.org/x/net/context"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type VicProvider struct {
-	resourceManager    *manager.ResourceManager
-	nodeName			string
-	os					string
-	portlayerAddr		string
-	podCount			int
+	resourceManager *manager.ResourceManager
+	nodeName        string
+	os              string
+	portlayerAddr   string
+	podCount        int
+	client          *client.PortLayer
+	imageStore      VicImageStore
+	podProxy        VicPodProxy
 }
 
-func NewVicProvider(config string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
+func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
+	config := NewVicConfig(configFile)
+
+	plClient := proxy.NewPortLayerClient(config.PortlayerAddr)
+	i, err := NewImageStore(plClient)
+	if err != nil {
+		return nil, fmt.Errorf("Couldn't initialize the image store")
+	}
+
 	p := VicProvider{
+		client:          plClient,
 		resourceManager: rm,
 	}
+
+	p.imageStore = i
+	p.podProxy = NewPodProxy(plClient, i)
+
 	return &p, nil
 }
 
 // CreatePod takes a Kubernetes Pod and deploys it within the provider.
 func (v *VicProvider) CreatePod(pod *v1.Pod) error {
+	op := trace.NewOperation(context.Background(), "CreatePod - %s", pod.Name)
+	defer trace.End(trace.Begin(pod.Name, op))
+
+	op.Info("pod spec = %#v", pod.Spec)
+
+	err := v.podProxy.CreatePod(op.Context, pod)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -61,19 +95,14 @@ func (v *VicProvider) GetPods() ([]*v1.Pod, error) {
 
 // Capacity returns a resource list with the capacity constraints of the provider.
 func (v *VicProvider) Capacity() v1.ResourceList {
-	client := proxy.NewPortLayerClient(v.portlayerAddr)
-	systemProxy := proxy.NewSystemProxy(client)
+	sp := proxy.NewSystemProxy(v.client)
 
-	vchInfo, err := systemProxy.VCHInfo(context.Background())
+	info, err := sp.VCHInfo(context.Background())
 	if err != nil {
 		return v1.ResourceList{}
 	}
 
-	return v1.ResourceList{
-		"cpu":    resource.MustParse(v.cpu),
-		"memory": resource.MustParse(v.memory),
-		"pods":   resource.MustParse(v.pods),
-	}
+	return KubeResourcesFromVchInfo(info)
 }
 
 // NodeConditions returns a list of conditions (Ready, OutOfDisk, etc), which is polled periodically to update the node status
@@ -139,4 +168,35 @@ func (v *VicProvider) NodeDaemonEndpoints() *v1.NodeDaemonEndpoints {
 // OperatingSystem returns the operating system the provider is for.
 func (v *VicProvider) OperatingSystem() string {
 	return "Photon OS"
+}
+
+//------------------------------------
+// Utility Functions
+//------------------------------------
+
+// KubeResourcesFromVchInfo returns a K8s node resource list, given the VCHInfo
+func KubeResourcesFromVchInfo(info *models.VCHInfo) v1.ResourceList {
+	var nr v1.ResourceList
+
+	// translate CPU resources.  K8s wants cores.  We have virtual cores based on mhz.
+	cpuQ := resource.Quantity{}
+	cpuQ.Set(info.CPUMhz)
+	nr[v1.ResourceCPU] = cpuQ
+
+	// translate memory resources.  K8s wants bytes.
+	memQ := resource.Quantity{}
+	memQ.Set(info.Memory)
+	nr[v1.ResourceMemory] = memQ
+
+	// translate storage and nvida gpu info
+	q := resource.Quantity{}
+	q.Set(0)
+	nr[v1.ResourceStorage] = q
+	nr[v1.ResourceEphemeralStorage] = q
+	nr[v1.ResourceNvidiaGPU] = q
+
+	// Get pod count
+	nr[v1.ResourcePods] = q
+
+	return nr
 }
