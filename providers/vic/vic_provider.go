@@ -3,7 +3,7 @@ package vic
 import (
 	"golang.org/x/net/context"
 
-	"github.com/vmware/vic/lib/apiservers/engine/proxy"
+	vicproxy "github.com/vmware/vic/lib/apiservers/engine/proxy"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/apiservers/portlayer/models"
 	"github.com/vmware/vic/pkg/trace"
@@ -11,9 +11,11 @@ import (
 	"fmt"
 
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 )
 
 type VicProvider struct {
@@ -23,15 +25,17 @@ type VicProvider struct {
 	portlayerAddr   string
 	podCount        int
 	client          *client.PortLayer
-	imageStore      VicImageStore
-	podProxy        VicPodProxy
+	imageStore      proxy.ImageStore
+	podProxy        proxy.PodProxy
+	systemProxy		vicproxy.VicSystemProxy
 }
+
 
 func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
 	config := NewVicConfig(configFile)
 
-	plClient := proxy.NewPortLayerClient(config.PortlayerAddr)
-	i, err := NewImageStore(plClient)
+	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
+	i, err := proxy.NewImageStore(plClient)
 	if err != nil {
 		return nil, fmt.Errorf("Couldn't initialize the image store")
 	}
@@ -39,10 +43,11 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	p := VicProvider{
 		client:          plClient,
 		resourceManager: rm,
+		systemProxy:	vicproxy.NewSystemProxy(plClient),
 	}
 
 	p.imageStore = i
-	p.podProxy = NewPodProxy(plClient, i)
+	p.podProxy = proxy.NewPodProxy(plClient, i, cache.NewVicPodCache())
 
 	return &p, nil
 }
@@ -51,6 +56,13 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 	op := trace.NewOperation(context.Background(), "CreatePod - %s", pod.Name)
 	defer trace.End(trace.Begin(pod.Name, op))
+
+	if v.podProxy == nil {
+		err := NilProxy("VicProvider.CreatePod", "PodProxy")
+		op.Error(err)
+
+		return err
+	}
 
 	op.Info("pod spec = %#v", pod.Spec)
 
@@ -74,6 +86,15 @@ func (v *VicProvider) DeletePod(pod *v1.Pod) error {
 
 // GetPod retrieves a pod by name from the provider (can be cached).
 func (v *VicProvider) GetPod(namespace, name string) (*v1.Pod, error) {
+	op := trace.NewOperation(context.Background(), "GetPod - %s", name)
+	defer trace.End(trace.Begin(name, op))
+
+	if v.podProxy == nil {
+		err := NilProxy("VicProvider.GetPod", "PodProxy")
+		op.Errorf(err)
+
+		return nil, err
+	}
 
 	return nil, nil
 }
@@ -95,9 +116,17 @@ func (v *VicProvider) GetPods() ([]*v1.Pod, error) {
 
 // Capacity returns a resource list with the capacity constraints of the provider.
 func (v *VicProvider) Capacity() v1.ResourceList {
-	sp := proxy.NewSystemProxy(v.client)
+	op := trace.NewOperation(context.Background(), "VicProvider.Capacity")
+	defer trace.End(trace.Begin("", op))
 
-	info, err := sp.VCHInfo(context.Background())
+	if v.systemProxy == nil {
+		err := NilProxy("VicProvider.Capacity", "SystemProxy")
+		op.Errorf(err)
+
+		return err
+	}
+
+	info, err := v.systemProxy.VCHInfo(context.Background())
 	if err != nil {
 		return v1.ResourceList{}
 	}
@@ -199,4 +228,8 @@ func KubeResourcesFromVchInfo(info *models.VCHInfo) v1.ResourceList {
 	nr[v1.ResourcePods] = q
 
 	return nr
+}
+
+func NilProxy(caller, proxyName string) error {
+	return fmt.Errorf("%s: %s not valid", caller, proxyName)
 }

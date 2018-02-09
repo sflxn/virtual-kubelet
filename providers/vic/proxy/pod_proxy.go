@@ -1,4 +1,4 @@
-package vic
+package proxy
 
 import (
 	"context"
@@ -15,16 +15,19 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/moby/moby/api/types"
 	"k8s.io/api/core/v1"
+
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
+	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 )
 
-type VicPodProxy interface {
+type PodProxy interface {
 	CreatePod(ctx context.Context, pod *v1.Pod) error
 }
 
-type PodProxy struct {
+type VicPodProxy struct {
 	client     *client.PortLayer
-	imageStore VicImageStore
-	//containerStore
+	imageStore ImageStore
+	podCache	cache.PodCache
 }
 
 const (
@@ -42,39 +45,47 @@ const (
 	DefaultCPUs = 2
 )
 
-func NewPodProxy(plClient *client.PortLayer, imageStore VicImageStore) VicPodProxy {
+func NewPodProxy(plClient *client.PortLayer, imageStore ImageStore, podCache cache.PodCache) PodProxy {
 	if plClient == nil {
 		return nil
 	}
 
-	return &PodProxy{
+	return &VicPodProxy{
 		client:     plClient,
 		imageStore: imageStore,
+		podCache:	podCache,
 	}
 }
 
-func (p *PodProxy) CreatePod(ctx context.Context, pod *v1.Pod) error {
-	op := trace.FromContext(ctx, "createContainer")
+func (v *VicPodProxy) CreatePod(ctx context.Context, pod *v1.Pod) error {
+	op := trace.FromContext(ctx, "CreatePod")
+	defer trace.End(trace.Begin(pod.Name, op))
 
 	// Create each container.  Only for prototype only.
 	for _, c := range pod.Spec.Containers {
 		// Transform kube container config to docker create config
 		createConfig := KubeSpecToDockerCreateSpec(c)
 
-		err := p.createContainer(ctx, createConfig)
+		err := v.createContainer(ctx, createConfig)
 		if err != nil {
 			op.Errorf("Failed to create container %s for pod %s", createConfig.Name, pod.Name)
 		}
 	}
 
+	err := v.podCache.Add(ctx, vicpod.VicNameFromPod(pod), pod)
+	if err != nil {
+		//TODO:  What should we do if pod already exist?
+	}
+
 	return nil
 }
 
-func (p *PodProxy) createContainer(ctx context.Context, config types.ContainerCreateConfig) error {
+func (v *VicPodProxy) createContainer(ctx context.Context, config types.ContainerCreateConfig) error {
 	op := trace.FromContext(ctx, "createContainer")
+	defer trace.End(trace.Begin("", op))
 
 	// Pull image config from VIC's image store
-	image, err := p.imageStore.Get(config.Config.Image)
+	image, err := v.imageStore.Get(op.Context, config.Config.Image)
 	if err != nil {
 		err = fmt.Errorf("PodProxy failed to get image %s's config from the image store: %s", err.Error())
 		op.Error(err)
