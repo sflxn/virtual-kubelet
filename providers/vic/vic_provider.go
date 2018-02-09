@@ -1,6 +1,22 @@
+// Copyright 2018 VMware, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package vic
 
 import (
+	"fmt"
+
 	"golang.org/x/net/context"
 
 	vicproxy "github.com/vmware/vic/lib/apiservers/engine/proxy"
@@ -8,30 +24,32 @@ import (
 	"github.com/vmware/vic/lib/apiservers/portlayer/models"
 	"github.com/vmware/vic/pkg/trace"
 
-	"fmt"
-
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 )
 
 type VicProvider struct {
 	resourceManager *manager.ResourceManager
 	nodeName        string
 	os              string
-	portlayerAddr   string
 	podCount        int
-	client          *client.PortLayer
-	imageStore      proxy.ImageStore
-	podProxy        proxy.PodProxy
-	systemProxy		vicproxy.VicSystemProxy
+	config          VicConfig
+	podCache        cache.PodCache
+
+	client      *client.PortLayer
+	imageStore  proxy.ImageStore
+	podProxy    proxy.PodProxy
+	systemProxy vicproxy.VicSystemProxy
 }
 
-
 func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
+	op := trace.NewOperation(context.Background(), "VicProvider creation: config - %s", configFile)
+	defer trace.End(trace.Begin("", op))
+
 	config := NewVicConfig(configFile)
 
 	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
@@ -41,13 +59,17 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	}
 
 	p := VicProvider{
+		config:          config,
+		nodeName:        nodeName,
+		os:              operatingSystem,
+		podCache:        cache.NewVicPodCache(),
 		client:          plClient,
 		resourceManager: rm,
-		systemProxy:	vicproxy.NewSystemProxy(plClient),
+		systemProxy:     vicproxy.NewSystemProxy(plClient),
 	}
 
 	p.imageStore = i
-	p.podProxy = proxy.NewPodProxy(plClient, i, cache.NewVicPodCache())
+	p.podProxy = proxy.NewPodProxy(plClient, i, p.podCache)
 
 	return &p, nil
 }
@@ -91,16 +113,25 @@ func (v *VicProvider) GetPod(namespace, name string) (*v1.Pod, error) {
 
 	if v.podProxy == nil {
 		err := NilProxy("VicProvider.GetPod", "PodProxy")
-		op.Errorf(err)
+		op.Error(err)
 
 		return nil, err
 	}
 
-	return nil, nil
+	// Look for the pod in our cache of running pods
+	pod, err := v.podCache.Get(op.Context, namespace, name)
+	if err != nil {
+		return nil, err
+	}
+
+	return pod, nil
 }
 
 // GetContainerLogs retrieves the logs of a container by name from the provider.
 func (v *VicProvider) GetContainerLogs(namespace, podName, containerName string, tail int) (string, error) {
+	op := trace.NewOperation(context.Background(), "GetContainerLogs - pod[%s], container[%s]", podName, containerName)
+	defer trace.End(trace.Begin("", op))
+
 	return "", nil
 }
 
@@ -111,7 +142,19 @@ func (v *VicProvider) GetPodStatus(namespace, name string) (*v1.PodStatus, error
 
 // GetPods retrieves a list of all pods running on the provider (can be cached).
 func (v *VicProvider) GetPods() ([]*v1.Pod, error) {
-	return []*v1.Pod{}, nil
+	op := trace.NewOperation(context.Background(), "GetPods")
+	defer trace.End(trace.Begin("", op))
+
+	if v.podProxy == nil {
+		err := NilProxy("VicProvider.GetPods", "PodProxy")
+		op.Error(err)
+
+		return nil, err
+	}
+
+	allPods := v.podCache.GetAll(op.Context)
+
+	return allPods, nil
 }
 
 // Capacity returns a resource list with the capacity constraints of the provider.
@@ -121,9 +164,9 @@ func (v *VicProvider) Capacity() v1.ResourceList {
 
 	if v.systemProxy == nil {
 		err := NilProxy("VicProvider.Capacity", "SystemProxy")
-		op.Errorf(err)
+		op.Error(err)
 
-		return err
+		return v1.ResourceList{}
 	}
 
 	info, err := v.systemProxy.VCHInfo(context.Background())
@@ -196,7 +239,7 @@ func (v *VicProvider) NodeDaemonEndpoints() *v1.NodeDaemonEndpoints {
 
 // OperatingSystem returns the operating system the provider is for.
 func (v *VicProvider) OperatingSystem() string {
-	return "Photon OS"
+	return v.os
 }
 
 //------------------------------------
