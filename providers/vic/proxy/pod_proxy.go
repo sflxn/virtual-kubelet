@@ -99,7 +99,7 @@ func (v *VicPodProxy) createContainer(ctx context.Context, config types.Containe
 	defer trace.End(trace.Begin("", op))
 
 	// Pull image config from VIC's image store
-	image, err := v.imageStore.Get(op.Context, config.Config.Image)
+	image, err := v.imageStore.Get(op.Context, config.Config.Image, true)
 	if err != nil {
 		err = fmt.Errorf("PodProxy failed to get image %s's config from the image store: %s", err.Error())
 		op.Error(err)
