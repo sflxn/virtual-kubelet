@@ -15,8 +15,11 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -30,18 +33,27 @@ import (
 	"github.com/moby/moby/api/types"
 	"k8s.io/api/core/v1"
 
+	"io/ioutil"
+
+	//"github.com/moby/moby/api/types/strslice"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
-	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 )
 
 type PodProxy interface {
-	CreatePod(ctx context.Context, pod *v1.Pod) error
+	CreatePod(ctx context.Context, name string, pod *v1.Pod) error
 }
 
 type VicPodProxy struct {
-	client     *client.PortLayer
-	imageStore ImageStore
-	podCache	cache.PodCache
+	client        *client.PortLayer
+	imageStore    ImageStore
+	podCache      cache.PodCache
+	personaAddr   string
+	portlayerAddr string
+}
+
+type CreateResponse struct {
+	Id       string `json:"Id"`
+	Warnings string `json:"Warnings"`
 }
 
 const (
@@ -57,36 +69,51 @@ const (
 	MinCPUs = 1
 	// DefaultCPUs - the default number of container VM CPUs
 	DefaultCPUs = 2
+
+	UsePortlayerProvisioner = false
 )
 
-func NewPodProxy(plClient *client.PortLayer, imageStore ImageStore, podCache cache.PodCache) PodProxy {
+func NewPodProxy(plClient *client.PortLayer, personaAddr, portlayerAddr string, imageStore ImageStore, podCache cache.PodCache) PodProxy {
 	if plClient == nil {
 		return nil
 	}
 
 	return &VicPodProxy{
-		client:     plClient,
-		imageStore: imageStore,
-		podCache:	podCache,
+		client:        plClient,
+		imageStore:    imageStore,
+		podCache:      podCache,
+		personaAddr:   personaAddr,
+		portlayerAddr: portlayerAddr,
 	}
 }
 
-func (v *VicPodProxy) CreatePod(ctx context.Context, pod *v1.Pod) error {
+func (v *VicPodProxy) CreatePod(ctx context.Context, name string, pod *v1.Pod) error {
 	op := trace.FromContext(ctx, "CreatePod")
 	defer trace.End(trace.Begin(pod.Name, op))
 
-	// Create each container.  Only for prototype only.
-	for _, c := range pod.Spec.Containers {
-		// Transform kube container config to docker create config
-		createConfig := KubeSpecToDockerCreateSpec(c)
+	var err error
 
-		err := v.createContainer(ctx, createConfig)
+	if UsePortlayerProvisioner {
+		// Create each container.  Only for prototype only.
+		for _, c := range pod.Spec.Containers {
+			// Transform kube container config to docker create config
+			createConfig := KubeSpecToDockerCreateSpec(c)
+
+			err := v.portlayerCreateContainer(ctx, createConfig)
+			if err != nil {
+				op.Errorf("Failed to create container %s for pod %s", createConfig.Name, pod.Name)
+			}
+		}
+	} else {
+		createConfig := DummyCreateSpec()
+
+		err = v.personaCreateContainer(ctx, createConfig)
 		if err != nil {
-			op.Errorf("Failed to create container %s for pod %s", createConfig.Name, pod.Name)
+			return err
 		}
 	}
 
-	err := v.podCache.Add(ctx, vicpod.VicNameFromPod(pod), pod)
+	err = v.podCache.Add(ctx, name, pod)
 	if err != nil {
 		//TODO:  What should we do if pod already exist?
 	}
@@ -94,20 +121,56 @@ func (v *VicPodProxy) CreatePod(ctx context.Context, pod *v1.Pod) error {
 	return nil
 }
 
-func (v *VicPodProxy) createContainer(ctx context.Context, config types.ContainerCreateConfig) error {
-	op := trace.FromContext(ctx, "createContainer")
-	defer trace.End(trace.Begin("", op))
+func (v *VicPodProxy) personaCreateContainer(ctx context.Context, config string) error {
+	op := trace.FromContext(ctx, "CreatePod")
 
-	// Pull image config from VIC's image store
-	image, err := v.imageStore.Get(op.Context, config.Config.Image, true)
+	personaServer := fmt.Sprintf("http://%s/v1.35/containers/create", v.personaAddr)
+	reader := bytes.NewBuffer([]byte(config))
+	resp, err := http.Post(personaServer, "application/json", reader)
 	if err != nil {
-		err = fmt.Errorf("PodProxy failed to get image %s's config from the image store: %s", err.Error())
-		op.Error(err)
+		op.Errorf("Error from from docker create: error = %s", err.Error())
+		return err
+	}
+	if resp.StatusCode >= 300 {
+		op.Errorf("Error from from docker create: status = %s", resp.Status)
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+
+	op.Infof("Response from docker create: status = %s", resp.Status)
+	op.Infof("Response from docker create: bod = %s", string(body))
+	var createResp CreateResponse
+	err = json.Unmarshal(body, &createResp)
+	if err != nil {
+		op.Errorf("Failed to unmarshal response from container create post")
+		return err
+	}
+	startContainerUrl := fmt.Sprintf("http://%s/v1.35/containers/%s", v.personaAddr, createResp.Id)
+	op.Infof("Starting container with request - %s", startContainerUrl)
+	_, err = http.Post(startContainerUrl, "", nil)
+	if err != nil {
+		op.Errorf("Failed to start container %s", createResp.Id)
 		return err
 	}
 
-	setCreateConfigOptions(config.Config, image.Config)
-	op.Infof("config = %#v", config.Config)
+	return nil
+}
+
+func (v *VicPodProxy) portlayerCreateContainer(ctx context.Context, config types.ContainerCreateConfig) error {
+	op := trace.FromContext(ctx, "createContainer")
+	defer trace.End(trace.Begin("", op))
+
+	//// Pull image config from VIC's image store
+	//image, err := v.imageStore.Get(op.Context, config.Config.Image, "", true)
+	//if err != nil {
+	//	err = fmt.Errorf("PodProxy failed to get image %s's config from the image store: %s", err.Error())
+	//	op.Error(err)
+	//	return err
+	//}
+	//
+	//setCreateConfigOptions(config.Config, image.Config)
+	//op.Infof("config = %#v", config.Config)
 
 	return nil
 }
@@ -115,6 +178,128 @@ func (v *VicPodProxy) createContainer(ctx context.Context, config types.Containe
 //------------------------------------
 // Utility Functions
 //------------------------------------
+
+func DummyCreateSpec() string {
+	config := `{
+			"Hostname":"",
+			"Domainname":"",
+			"User":"",
+			"AttachStdin":false,
+			"AttachStdout":false,
+			"AttachStderr":false,
+			"Tty":false,
+			"OpenStdin":false,
+			"StdinOnce":false,
+			"Env":[
+
+			],
+			"Cmd":[
+			"/bin/top"
+			],
+			"Image":"busybox",
+			"Volumes":{
+
+		},
+		"WorkingDir":"",
+		"Entrypoint":null,
+		"OnBuild":null,
+		"Labels":{
+
+		},
+		"HostConfig":{
+		"Binds":null,
+		"ContainerIDFile":"",
+		"LogConfig":{
+		"Type":"",
+		"Config":{
+
+		}
+		},
+		"NetworkMode":"default",
+		"PortBindings":{
+
+		},
+		"RestartPolicy":{
+		"Name":"no",
+		"MaximumRetryCount":0
+		},
+		"AutoRemove":false,
+		"VolumeDriver":"",
+		"VolumesFrom":null,
+		"CapAdd":null,
+		"CapDrop":null,
+		"Dns":[
+
+		],
+		"DnsOptions":[
+
+		],
+		"DnsSearch":[
+
+		],
+		"ExtraHosts":null,
+		"GroupAdd":null,
+		"IpcMode":"",
+		"Cgroup":"",
+		"Links":null,
+		"OomScoreAdj":0,
+		"PidMode":"",
+		"Privileged":false,
+		"PublishAllPorts":false,
+		"ReadonlyRootfs":false,
+		"SecurityOpt":null,
+		"UTSMode":"",
+		"UsernsMode":"",
+		"ShmSize":0,
+		"ConsoleSize":[
+		0,
+		0
+		],
+		"Isolation":"",
+		"CpuShares":0,
+		"Memory":0,
+		"NanoCpus":0,
+		"CgroupParent":"",
+		"BlkioWeight":0,
+		"BlkioWeightDevice":[
+
+		],
+		"BlkioDeviceReadBps":null,
+		"BlkioDeviceWriteBps":null,
+		"BlkioDeviceReadIOps":null,
+		"BlkioDeviceWriteIOps":null,
+		"CpuPeriod":0,
+		"CpuQuota":0,
+		"CpuRealtimePeriod":0,
+		"CpuRealtimeRuntime":0,
+		"CpusetCpus":"",
+		"CpusetMems":"",
+		"Devices":[
+
+		],
+		"DeviceCgroupRules":null,
+		"DiskQuota":0,
+		"KernelMemory":0,
+		"MemoryReservation":0,
+		"MemorySwap":0,
+		"MemorySwappiness":-1,
+		"OomKillDisable":false,
+		"PidsLimit":0,
+		"Ulimits":null,
+		"CpuCount":0,
+		"CpuPercent":0,
+		"IOMaximumIOps":0,
+		"IOMaximumBandwidth":0
+		},
+		"NetworkingConfig":{
+		"EndpointsConfig":{
+
+		}
+		}
+		}`
+
+	return config
+}
 
 // TODO: refactor so we no longer need to know about docker types
 func KubeSpecToDockerCreateSpec(cSpec v1.Container) types.ContainerCreateConfig {

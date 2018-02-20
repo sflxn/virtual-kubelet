@@ -16,6 +16,7 @@ package vic
 
 import (
 	"fmt"
+	"time"
 
 	"golang.org/x/net/context"
 
@@ -46,6 +47,10 @@ type VicProvider struct {
 	systemProxy vicproxy.VicSystemProxy
 }
 
+const (
+	RunningInVCH = false
+)
+
 func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
 	op := trace.NewOperation(context.Background(), "VicProvider creation: config - %s", configFile)
 	defer trace.End(trace.Begin("", op))
@@ -53,7 +58,7 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	config := NewVicConfig(configFile)
 
 	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
-	i, err := proxy.NewImageStore(plClient)
+	i, err := proxy.NewImageStore(plClient, config.PortlayerAddr)
 	if err != nil {
 		return nil, fmt.Errorf("Couldn't initialize the image store")
 	}
@@ -69,7 +74,7 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	}
 
 	p.imageStore = i
-	p.podProxy = proxy.NewPodProxy(plClient, i, p.podCache)
+	p.podProxy = proxy.NewPodProxy(plClient, config.PersonaAddr, config.PortlayerAddr, i, p.podCache)
 
 	return &p, nil
 }
@@ -86,13 +91,14 @@ func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 		return err
 	}
 
-	op.Info("pod spec = %#v", pod.Spec)
+	op.Infof("%s's pod spec = %#v", pod.Name, pod.Spec)
 
-	err := v.podProxy.CreatePod(op.Context, pod)
+	err := v.podProxy.CreatePod(op.Context, pod.Name, pod)
 	if err != nil {
 		return err
 	}
 
+	op.Infof("** pod created ok")
 	return nil
 }
 
@@ -136,15 +142,62 @@ func (v *VicProvider) GetContainerLogs(namespace, podName, containerName string,
 }
 
 // GetPodStatus retrieves the status of a pod by name from the provider.
+// This function needs to return a status or the reconcile loop will stop running.
 func (v *VicProvider) GetPodStatus(namespace, name string) (*v1.PodStatus, error) {
-	return nil, nil
+	op := trace.NewOperation(context.Background(), "GetPodStatus - pod[%s], namespace", name, namespace)
+	defer trace.End(trace.Begin("GetPodStatus", op))
+
+	now := metav1.NewTime(time.Now())
+
+	status := &v1.PodStatus{
+		Phase:     v1.PodRunning,
+		HostIP:    "1.2.3.4",
+		PodIP:     "5.6.7.8",
+		StartTime: &now,
+		Conditions: []v1.PodCondition{
+			{
+				Type:   v1.PodInitialized,
+				Status: v1.ConditionTrue,
+			},
+			{
+				Type:   v1.PodReady,
+				Status: v1.ConditionTrue,
+			},
+			{
+				Type:   v1.PodScheduled,
+				Status: v1.ConditionTrue,
+			},
+		},
+	}
+
+	pod, err := v.GetPod(namespace, name)
+	if err != nil {
+		return status, err
+	}
+
+	for _, container := range pod.Spec.Containers {
+		status.ContainerStatuses = append(status.ContainerStatuses, v1.ContainerStatus{
+			Name:         container.Name,
+			Image:        container.Image,
+			Ready:        true,
+			RestartCount: 0,
+			State: v1.ContainerState{
+				Running: &v1.ContainerStateRunning{
+					StartedAt: now,
+				},
+			},
+		})
+	}
+
+	return status, nil
 }
 
 // GetPods retrieves a list of all pods running on the provider (can be cached).
 func (v *VicProvider) GetPods() ([]*v1.Pod, error) {
 	op := trace.NewOperation(context.Background(), "GetPods")
-	defer trace.End(trace.Begin("", op))
+	defer trace.End(trace.Begin("GetPods", op))
 
+	op.Info("** GetPods")
 	if v.podProxy == nil {
 		err := NilProxy("VicProvider.GetPods", "PodProxy")
 		op.Error(err)
@@ -162,19 +215,29 @@ func (v *VicProvider) Capacity() v1.ResourceList {
 	op := trace.NewOperation(context.Background(), "VicProvider.Capacity")
 	defer trace.End(trace.Begin("", op))
 
-	if v.systemProxy == nil {
-		err := NilProxy("VicProvider.Capacity", "SystemProxy")
-		op.Error(err)
+	if RunningInVCH {
+		if v.systemProxy == nil {
+			err := NilProxy("VicProvider.Capacity", "SystemProxy")
+			op.Error(err)
 
-		return v1.ResourceList{}
+			return v1.ResourceList{}
+		}
+
+		info, err := v.systemProxy.VCHInfo(context.Background())
+		if err != nil {
+			op.Errorf("VicProvider.Capacity failed to get vchinfo: %s", err.Error())
+			return v1.ResourceList{}
+		}
+
+		return KubeResourcesFromVchInfo(info)
+	} else {
+		// Return fake data
+		return v1.ResourceList{
+			"cpu":    resource.MustParse("20"),
+			"memory": resource.MustParse("100Gi"),
+			"pods":   resource.MustParse("20"),
+		}
 	}
-
-	info, err := v.systemProxy.VCHInfo(context.Background())
-	if err != nil {
-		return v1.ResourceList{}
-	}
-
-	return KubeResourcesFromVchInfo(info)
 }
 
 // NodeConditions returns a list of conditions (Ready, OutOfDisk, etc), which is polled periodically to update the node status
@@ -228,13 +291,17 @@ func (v *VicProvider) NodeConditions() []v1.NodeCondition {
 // NodeAddresses returns a list of addresses for the node status
 // within Kubernetes.
 func (v *VicProvider) NodeAddresses() []v1.NodeAddress {
-	return []v1.NodeAddress{}
+	return nil
 }
 
 // NodeDaemonEndpoints returns NodeDaemonEndpoints for the node status
 // within Kubernetes.
 func (v *VicProvider) NodeDaemonEndpoints() *v1.NodeDaemonEndpoints {
-	return nil
+	return &v1.NodeDaemonEndpoints{
+		KubeletEndpoint: v1.DaemonEndpoint{
+			Port: 80,
+		},
+	}
 }
 
 // OperatingSystem returns the operating system the provider is for.

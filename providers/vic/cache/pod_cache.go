@@ -23,7 +23,7 @@ import (
 
 	"github.com/vmware/vic/pkg/trace"
 
-	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
+	//vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 )
 
 type PodCache interface {
@@ -54,8 +54,9 @@ func (v *VicPodCache) Get(ctx context.Context, namespace, name string) (*v1.Pod,
 	op := trace.FromContext(ctx, "Get")
 	defer trace.End(trace.Begin(name, op))
 
-	vicName := vicpod.VicName(namespace, name)
-	pod, ok := v.cache[vicName]
+	//vicName := vicpod.VicName(namespace, name)
+	//pod, ok := v.cache[vicName]
+	pod, ok := v.cache[name]
 	if !ok {
 		err := fmt.Errorf("Pod %s not found in cache", name)
 

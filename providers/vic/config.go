@@ -25,7 +25,8 @@ import (
 )
 
 type VicConfig struct {
-	PortlayerAddr	string `yaml:"portlayer-server"`
+	PersonaAddr   string `yaml:"persona-server"`
+	PortlayerAddr string `yaml:"portlayer-server"`
 }
 
 func NewVicConfig(configFile string) VicConfig {
