@@ -55,7 +55,7 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	op := trace.NewOperation(context.Background(), "VicProvider creation: config - %s", configFile)
 	defer trace.End(trace.Begin("", op))
 
-	config := NewVicConfig(configFile)
+	config := NewVicConfig(op, configFile)
 
 	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
 	i, err := proxy.NewImageStore(plClient, config.PortlayerAddr)

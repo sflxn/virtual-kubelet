@@ -93,23 +93,22 @@ func (v *VicPodProxy) CreatePod(ctx context.Context, name string, pod *v1.Pod) e
 
 	var err error
 
-	if UsePortlayerProvisioner {
 		// Create each container.  Only for prototype only.
-		for _, c := range pod.Spec.Containers {
-			// Transform kube container config to docker create config
-			createConfig := KubeSpecToDockerCreateSpec(c)
-
+	for _, c := range pod.Spec.Containers {
+		// Transform kube container config to docker create config
+		createConfig := KubeSpecToDockerCreateSpec(c)
+		if UsePortlayerProvisioner {
 			err := v.portlayerCreateContainer(ctx, createConfig)
 			if err != nil {
 				op.Errorf("Failed to create container %s for pod %s", createConfig.Name, pod.Name)
 			}
-		}
-	} else {
-		createConfig := DummyCreateSpec()
+		} else {
+			createString := DummyCreateSpec()
 
-		err = v.personaCreateContainer(ctx, createConfig)
-		if err != nil {
-			return err
+			err = v.personaCreateContainer(ctx, createString)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -329,6 +328,17 @@ func KubeSpecToDockerCreateSpec(cSpec v1.Container) types.ContainerCreateConfig 
 	return config
 }
 
+func CreateConfigToString(config types.ContainerCreateConfig) (string, error) {
+	buf := bytes.NewBufferString("")
+	encoder := json.NewEncoder(buf)
+	err := encoder.Encode(config)
+	if err != nil {
+		return "", err
+	}
+
+	return buf.String(), nil
+}
+
 // SetConfigOptions is a place to add necessary container configuration
 // values that were not explicitly supplied by the user
 func setCreateConfigOptions(config, imageConfig *container.Config) {
@@ -490,7 +500,7 @@ func validateCreateConfig(config *types.ContainerCreateConfig) error {
 	//
 	//// validate port bindings
 	//var ips []string
-	//if addrs, err := networking.PublicIPv4Addrs(); err != nil {
+	//if addrs, err := network.PublicIPv4Addrs(); err != nil {
 	//	log.Warnf("could not get address for public interface: %s", err)
 	//} else {
 	//	ips = make([]string, len(addrs))

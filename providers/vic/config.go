@@ -18,9 +18,11 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"os"
 
 	"gopkg.in/yaml.v2"
 
+	"github.com/vmware/vic/lib/portlayer/util"
 	"github.com/vmware/vic/pkg/trace"
 )
 
@@ -29,10 +31,20 @@ type VicConfig struct {
 	PortlayerAddr string `yaml:"portlayer-server"`
 }
 
-func NewVicConfig(configFile string) VicConfig {
+const (
+	personaAddrEnv = "PERSONA_ADDR"
+	portlayerAddrEnv = "PORTLAYER_ADDR"
+)
+
+
+func NewVicConfig(op trace.Operation, configFile string) VicConfig {
 	var config VicConfig
 
-	config.loadConfigFile(configFile)
+	if configFile == "" {
+		config.loadConfigFromEnv()
+	} else {
+		config.loadConfigFile(configFile)
+	}
 
 	return config
 }
@@ -57,4 +69,9 @@ func (v *VicConfig) loadConfigFile(configFile string) error {
 	*v = config
 
 	return nil
+}
+
+func (v *VicConfig) loadConfigFromEnv() {
+	v.PersonaAddr = os.Getenv(personaAddrEnv)
+	v.PortlayerAddr = os.Getenv(portlayerAddrEnv)
 }
