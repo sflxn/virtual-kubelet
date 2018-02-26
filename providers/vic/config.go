@@ -22,7 +22,6 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"github.com/vmware/vic/lib/portlayer/util"
 	"github.com/vmware/vic/pkg/trace"
 )
 
@@ -32,10 +31,9 @@ type VicConfig struct {
 }
 
 const (
-	personaAddrEnv = "PERSONA_ADDR"
+	personaAddrEnv   = "PERSONA_ADDR"
 	portlayerAddrEnv = "PORTLAYER_ADDR"
 )
-
 
 func NewVicConfig(op trace.Operation, configFile string) VicConfig {
 	var config VicConfig

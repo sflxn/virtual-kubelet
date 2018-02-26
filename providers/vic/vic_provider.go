@@ -16,14 +16,23 @@ package vic
 
 import (
 	"fmt"
+	"os"
+	"path"
 	"time"
 
 	"golang.org/x/net/context"
 
+	log "github.com/Sirupsen/logrus"
+
 	vicproxy "github.com/vmware/vic/lib/apiservers/engine/proxy"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/apiservers/portlayer/models"
+	"github.com/vmware/vic/lib/constants"
+	"github.com/vmware/vic/pkg/dio"
+	viclog "github.com/vmware/vic/pkg/log"
 	"github.com/vmware/vic/pkg/trace"
+
+	"syscall"
 
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
@@ -49,9 +58,29 @@ type VicProvider struct {
 
 const (
 	RunningInVCH = false
+	LogFilename  = "virtual-kubelet"
+
+	// PanicLevel level, highest level of severity. Logs and then calls panic with the
+	// message passed to Debug, Info, ...
+	PanicLevel uint8 = iota
+	// FatalLevel level. Logs and then calls `os.Exit(1)`. It will exit even if the
+	// logging level is set to Panic.
+	FatalLevel
+	// ErrorLevel level. Logs. Used for errors that should definitely be noted.
+	// Commonly used for hooks to send errors to an error tracking service.
+	ErrorLevel
+	// WarnLevel level. Non-critical entries that deserve eyes.
+	WarnLevel
+	// InfoLevel level. General operational entries about what's going on inside the
+	// application.
+	InfoLevel
+	// DebugLevel level. Usually only enabled when debugging. Very verbose logging.
+	DebugLevel
 )
 
 func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
+	initLogger()
+
 	op := trace.NewOperation(context.Background(), "VicProvider creation: config - %s", configFile)
 	defer trace.End(trace.Begin("", op))
 
@@ -60,7 +89,9 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
 	i, err := proxy.NewImageStore(plClient, config.PortlayerAddr)
 	if err != nil {
-		return nil, fmt.Errorf("Couldn't initialize the image store")
+		msg := "Couldn't initialize the image store"
+		op.Error(msg)
+		return nil, fmt.Errorf(msg)
 	}
 
 	p := VicProvider{
@@ -77,6 +108,34 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	p.podProxy = proxy.NewPodProxy(plClient, config.PersonaAddr, config.PortlayerAddr, i, p.podCache)
 
 	return &p, nil
+}
+
+func initLogger() {
+	logPath := path.Join("", constants.DefaultLogDir, LogFilename+".log")
+
+	os.MkdirAll(constants.DefaultLogDir, 0755)
+	// #nosec: Expect file permissions to be 0600 or less
+	f, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND|os.O_SYNC|syscall.O_NOCTTY, 0644)
+	if err != nil {
+		detail := fmt.Sprintf("failed to open file for VIC's virtual kubelet provider log: %s", err)
+		log.Error(detail)
+	}
+
+	// use multi-writer so it goes to both screen and session log
+	writer := dio.MultiWriter(f, os.Stdout)
+
+	logcfg := viclog.NewLoggingConfig()
+
+	logcfg.SetLogLevel(DebugLevel)
+	trace.SetLoggerLevel(DebugLevel)
+	trace.Logger.Out = writer
+
+	err = viclog.Init(logcfg)
+	if err != nil {
+		return
+	}
+
+	trace.InitLogger(logcfg)
 }
 
 // CreatePod takes a Kubernetes Pod and deploys it within the provider.
