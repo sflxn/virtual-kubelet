@@ -107,7 +107,15 @@ func (v *VicPodProxy) CreatePod(ctx context.Context, name string, pod *v1.Pod) e
 
 			err = v.personaCreateContainer(ctx, createString)
 			if err != nil {
-				return err
+				err = v.personaPullContainer(ctx, "busybox")
+				if err != nil {
+					return err
+				}
+
+				err = v.personaCreateContainer(ctx, createString)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -132,7 +140,7 @@ func (v *VicPodProxy) personaCreateContainer(ctx context.Context, config string)
 	}
 	if resp.StatusCode >= 300 {
 		op.Errorf("Error from from docker create: status = %s", resp.Status)
-		return err
+		return fmt.Errorf("Image not found")
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
@@ -145,11 +153,25 @@ func (v *VicPodProxy) personaCreateContainer(ctx context.Context, config string)
 		op.Errorf("Failed to unmarshal response from container create post")
 		return err
 	}
-	startContainerUrl := fmt.Sprintf("http://%s/v1.35/containers/%s", v.personaAddr, createResp.Id)
+	startContainerUrl := fmt.Sprintf("http://%s/v1.35/containers/%s/start", v.personaAddr, createResp.Id)
 	op.Infof("Starting container with request - %s", startContainerUrl)
 	_, err = http.Post(startContainerUrl, "", nil)
 	if err != nil {
 		op.Errorf("Failed to start container %s", createResp.Id)
+		return err
+	}
+
+	return nil
+}
+
+func (v *VicPodProxy) personaPullContainer(ctx context.Context, image string) error {
+	op := trace.FromContext(ctx, "CreatePod")
+
+	personaServer := fmt.Sprintf("http://%s/v1.35/images/create?fromImage=%s", v.personaAddr, image)
+	op.Infof("POST %s", personaServer)
+	_, err := http.Post(personaServer, "", nil)
+	if err != nil {
+		op.Errorf("Error from docker pull: error = %s", err.Error())
 		return err
 	}
 
