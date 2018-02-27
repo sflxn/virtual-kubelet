@@ -110,16 +110,16 @@ func (v *VicPodProxy) CreatePod(ctx context.Context, name string, pod *v1.Pod) e
 				op.Errorf("Failed to create container %s for pod %s", createConfig.Name, pod.Name)
 			}
 		} else {
-			createString := DummyCreateSpec()
+			createString := DummyCreateSpec(c.Image, c.Command)
 
 			err = v.personaCreateContainer(ctx, createString)
 			if err != nil {
-				err = v.personaPullContainer(ctx, "busybox")
+				err = v.personaPullContainer(ctx, c.Image)
 				if err != nil {
 					return err
 				}
 
-				err = v.personaCreateContainer(ctx, createString)
+					err = v.personaCreateContainer(ctx, createString)
 				if err != nil {
 					return err
 				}
@@ -164,13 +164,13 @@ func (v *VicPodProxy) personaCreateContainer(ctx context.Context, config string)
 		return err
 	}
 	if resp.StatusCode >= 300 {
-		op.Errorf("Error from from docker create: status = %d", resp.Status)
+		op.Errorf("Error from from docker create: status = %d", resp.StatusCode)
 		return fmt.Errorf("Image not found")
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 
-	op.Infof("Response from docker create: status = %s", resp.Status)
+	op.Infof("Response from docker create: status = %d", resp.StatusCode)
 	op.Infof("Response from docker create: bod = %s", string(body))
 	var createResp CreateResponse
 	err = json.Unmarshal(body, &createResp)
@@ -192,13 +192,30 @@ func (v *VicPodProxy) personaCreateContainer(ctx context.Context, config string)
 func (v *VicPodProxy) personaPullContainer(ctx context.Context, image string) error {
 	op := trace.FromContext(ctx, "CreatePod")
 
+	pullClient := &http.Client{Timeout:60 * time.Second}
 	personaServer := fmt.Sprintf("http://%s/v1.35/images/create?fromImage=%s", v.personaAddr, image)
 	op.Infof("POST %s", personaServer)
-	_, err := http.Post(personaServer, "", nil)
+	reader := bytes.NewBuffer([]byte(""))
+	resp, err := pullClient.Post(personaServer, "application/json", reader)
 	if err != nil {
 		op.Errorf("Error from docker pull: error = %s", err.Error())
 		return err
 	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		msg := fmt.Sprintf("Error from docker pull: status = %d", resp.StatusCode)
+		op.Errorf(msg)
+		return fmt.Errorf(msg)
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		msg := fmt.Sprintf("Error reading docker pull response: error = %s", err.Error())
+		op.Errorf(msg)
+		return fmt.Errorf(msg)
+	}
+	op.Infof("Response from docker pull: body = %s", string(body))
 
 	return nil
 }
@@ -225,7 +242,16 @@ func (v *VicPodProxy) portlayerCreateContainer(ctx context.Context, config types
 // Utility Functions
 //------------------------------------
 
-func DummyCreateSpec() string {
+func DummyCreateSpec(image string, cmd []string) string {
+	var command string
+	for i, c := range cmd {
+		if i == 0 {
+			command = fmt.Sprintf("\"%s\"", c)
+		} else {
+			command = command + fmt.Sprintf(", \"%s\"", c)
+		}
+	}
+
 	config := `{
 			"Hostname":"",
 			"Domainname":"",
@@ -240,9 +266,9 @@ func DummyCreateSpec() string {
 
 			],
 			"Cmd":[
-			"/bin/top"
+			`+command+`
 			],
-			"Image":"busybox",
+			"Image":"`+image+`",
 			"Volumes":{
 
 		},
