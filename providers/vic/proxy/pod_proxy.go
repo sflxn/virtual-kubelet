@@ -19,9 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apex/log"
 	units "github.com/docker/go-units"
@@ -33,9 +35,6 @@ import (
 	"github.com/moby/moby/api/types"
 	"k8s.io/api/core/v1"
 
-	"io/ioutil"
-
-	//"github.com/moby/moby/api/types/strslice"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 )
 
@@ -93,7 +92,15 @@ func (v *VicPodProxy) CreatePod(ctx context.Context, name string, pod *v1.Pod) e
 
 	var err error
 
-		// Create each container.  Only for prototype only.
+	for i := 0; i < 30; i++ {
+		err = v.pingPersona(ctx)
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	// Create each container.  Only for prototype only.
 	for _, c := range pod.Spec.Containers {
 		// Transform kube container config to docker create config
 		createConfig := KubeSpecToDockerCreateSpec(c)
@@ -128,6 +135,24 @@ func (v *VicPodProxy) CreatePod(ctx context.Context, name string, pod *v1.Pod) e
 	return nil
 }
 
+func (v *VicPodProxy) pingPersona(ctx context.Context) error {
+	op := trace.FromContext(ctx, "CreatePod")
+
+	personaServer := fmt.Sprintf("http://%s/v1.35/info", v.personaAddr)
+	resp, err := http.Get(personaServer)
+	if err != nil {
+		op.Errorf("Ping failed: error = %s", err.Error())
+		return err
+	}
+
+	if resp.StatusCode >= 300 {
+		op.Errorf("Ping failed: status = %d", resp.StatusCode)
+		return fmt.Errorf("Server Error")
+	}
+
+	return nil
+}
+
 func (v *VicPodProxy) personaCreateContainer(ctx context.Context, config string) error {
 	op := trace.FromContext(ctx, "CreatePod")
 
@@ -139,7 +164,7 @@ func (v *VicPodProxy) personaCreateContainer(ctx context.Context, config string)
 		return err
 	}
 	if resp.StatusCode >= 300 {
-		op.Errorf("Error from from docker create: status = %s", resp.Status)
+		op.Errorf("Error from from docker create: status = %d", resp.Status)
 		return fmt.Errorf("Image not found")
 	}
 	defer resp.Body.Close()
