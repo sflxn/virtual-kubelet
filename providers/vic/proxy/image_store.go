@@ -15,21 +15,17 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
-	//"net/url"
-	//"os"
-	//"strings"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"time"
 
-	//"github.com/vmware/vic/lib/apiservers/engine/backends/cache"
-	//"github.com/vmware/vic/lib/apiservers/engine/errors"
+	"github.com/vmware/vic/lib/apiservers/engine/backends/cache"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
-	//"github.com/vmware/vic/lib/imagec"
 	"github.com/vmware/vic/lib/metadata"
-	//"github.com/vmware/vic/pkg/trace"
-	//"github.com/docker/docker/reference"
-
-	//"github.com/docker/distribution/digest"
-	//"github.com/docker/distribution/reference"
+	"github.com/vmware/vic/pkg/trace"
 )
 
 type ImageStore interface {
@@ -40,17 +36,19 @@ type ImageStore interface {
 
 type VicImageStore struct {
 	client        *client.PortLayer
+	personaAddr   string
 	portlayerAddr string
 }
 
-func NewImageStore(plClient *client.PortLayer, portlayerAddr string) (ImageStore, error) {
-	//err := cache.InitializeImageCache(plClient)
-	//if err != nil {
-	//	return nil, err
-	//}
+func NewImageStore(plClient *client.PortLayer, personaAddr, portlayerAddr string) (ImageStore, error) {
+	err := cache.InitializeImageCache(plClient)
+	if err != nil {
+		return nil, err
+	}
 
 	vs := &VicImageStore{
 		client:        plClient,
+		personaAddr:   personaAddr,
 		portlayerAddr: portlayerAddr,
 	}
 
@@ -60,108 +58,66 @@ func NewImageStore(plClient *client.PortLayer, portlayerAddr string) (ImageStore
 // Get returns an ImageConfig.  If the config is not cached, VicImageStore can request
 // imagec to pull the image if actuate is set to true.
 func (v *VicImageStore) Get(ctx context.Context, idOrRef, tag string, actuate bool) (*metadata.ImageConfig, error) {
-	//op := trace.FromContext(ctx, "Get - %s:%s", idOrRef, tag)
-	//defer trace.End(trace.Begin("", op))
-	//
-	//c, err := cache.ImageCache().Get(idOrRef)
-	//if err != nil && actuate {
-	//	err = v.PullImage(ctx, idOrRef, tag, "", "")
-	//}
-	//
-	//if err != nil {
-	//	return nil, err
-	//}
-	//
-	//return c, nil
-	return nil, nil
+	op := trace.FromContext(ctx, "Get - %s:%s", idOrRef, tag)
+	defer trace.End(trace.Begin("", op))
+
+	c, err := cache.ImageCache().Get(idOrRef)
+	if err != nil && actuate {
+		err = v.PullImage(ctx, idOrRef, tag, "", "")
+		if err == nil {
+			c, err = cache.ImageCache().Get(idOrRef)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return c, nil
 }
 
 func (v *VicImageStore) GetImages(ctx context.Context) []*metadata.ImageConfig {
-	return nil
+	op := trace.FromContext(ctx, "GetImages")
+	defer trace.End(trace.Begin("", op))
+
+	return cache.ImageCache().GetImages()
 }
 
-// PullImage makes sure our shared imagestore (with VIC's docker) has the image
-// TODO: We need to rewrite this function so there is no need to pull in docker imports.
-// TODO: We need to refactor out the whitelist handling in VIC's docker persona to work with the virtual-kubelet
+// PullImage pulls images using the docker persona.  It simply issues a pull rest call to the persona.
+// This lets the persona be the imagec server and keeps both the kubelet and docker persona up to date
+// when the kubelet pulls an image.
 func (v *VicImageStore) PullImage(ctx context.Context, image, tag, username, password string) error {
-	//op := trace.FromContext(ctx, "Get - %s:%s", image, tag)
-	//defer trace.End(trace.Begin("", op))
-	//
-	////***** Code from Docker 1.13 PullImage to convert image and tag to a ref
-	//image = strings.TrimSuffix(image, ":")
-	//
-	//ref, err := reference.ParseNamed(image)
-	//if err != nil {
-	//	return err
-	//}
-	//
-	//if tag != "" {
-	//	// The "tag" could actually be a digest.
-	//	var dgst digest.Digest
-	//	dgst, err = digest.ParseDigest(tag)
-	//	if err == nil {
-	//		ref, err = reference.WithDigest(reference.TrimNamed(ref), dgst)
-	//	} else {
-	//		ref, err = reference.WithTag(ref, tag)
-	//	}
-	//	if err != nil {
-	//		return err
-	//	}
-	//}
-	////*****
-	//
-	//options := imagec.Options{
-	//	Destination: os.TempDir(),
-	//	Reference:   ref,
-	//	Timeout:     imagec.DefaultHTTPTimeout,
-	//	Outstream:   nil,
-	//}
-	//
-	//portLayerServer := v.portlayerAddr
-	//if portLayerServer != "" {
-	//	options.Host = portLayerServer
-	//}
-	//
-	////ic := imagec.NewImageC(options, streamformatter.NewJSONStreamFormatter())
-	//ic := imagec.NewImageC(options, nil)
-	//ic.ParseReference()
-	//// create url from hostname
-	//hostnameURL, err := url.Parse(ic.Registry)
-	//if err != nil || hostnameURL.Hostname() == "" {
-	//	hostnameURL, err = url.Parse("//" + ic.Registry)
-	//	if err != nil {
-	//		op.Infof("Error parsing hostname %s during registry access: %s", ic.Registry, err.Error())
-	//	}
-	//}
-	//
-	//// Check if url is contained within set of whitelisted or insecure registries
-	////regctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	////defer cancel()
-	////whitelistOk, _, insecureOk := vchConfig.RegistryCheck(regctx, hostnameURL)
-	////if !whitelistOk {
-	////	err = fmt.Errorf("Access denied to unauthorized registry (%s) while VCH is in whitelist mode", hostnameURL.Host)
-	////	op.Errorf(err.Error())
-	////	sf := streamformatter.NewJSONStreamFormatter()
-	////	outStream.Write(sf.FormatError(err))
-	////	return nil
-	////}
-	//
-	//ic.InsecureAllowHTTP = true
-	////ic.InsecureAllowHTTP = insecureOk
-	////ic.RegistryCAs = RegistryCertPool
-	//
-	//ic.Username = username
-	//ic.Password = password
-	//
-	//op.Infof("PullImage: reference: %s, %s, portlayer: %#v",
-	//	ic.Reference,
-	//	ic.Host,
-	//	portLayerServer)
-	//
-	//err = ic.PullImage()
-	//if err != nil {
-	//	return err
-	//}
+	op := trace.FromContext(ctx, "Get - %s:%s", image, tag)
+	defer trace.End(trace.Begin("", op))
+
+	pullClient := &http.Client{Timeout: 60 * time.Second}
+	var personaServer string
+	if tag == "" {
+		personaServer = fmt.Sprintf("http://%s/v1.35/images/create?fromImage=%s", v.personaAddr, image)
+	} else {
+		personaServer = fmt.Sprintf("http://%s/v1.35/images/create?fromImage=%s&tag=%s", v.personaAddr, image, tag)
+	}
+	op.Infof("POST %s", personaServer)
+	reader := bytes.NewBuffer([]byte(""))
+	resp, err := pullClient.Post(personaServer, "application/json", reader)
+	if err != nil {
+		op.Errorf("Error from docker pull: error = %s", err.Error())
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		msg := fmt.Sprintf("Error from docker pull: status = %d", resp.StatusCode)
+		op.Errorf(msg)
+		return fmt.Errorf(msg)
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		msg := fmt.Sprintf("Error reading docker pull response: error = %s", err.Error())
+		op.Errorf(msg)
+		return fmt.Errorf(msg)
+	}
+	op.Infof("Response from docker pull: body = %s", string(body))
 
 	return nil
 }

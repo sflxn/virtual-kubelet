@@ -28,6 +28,7 @@ import (
 type VicConfig struct {
 	PersonaAddr   string `yaml:"persona-server"`
 	PortlayerAddr string `yaml:"portlayer-server"`
+
 }
 
 const (

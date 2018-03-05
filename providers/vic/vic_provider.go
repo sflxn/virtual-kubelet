@@ -52,7 +52,7 @@ type VicProvider struct {
 
 	client      *client.PortLayer
 	imageStore  proxy.ImageStore
-	podProxy    proxy.PodProxy
+	isolationProxy    proxy.IsolationProxy
 	systemProxy vicproxy.VicSystemProxy
 }
 
@@ -78,6 +78,10 @@ const (
 	DebugLevel
 )
 
+var (
+	portlayerUp chan struct{}
+)
+
 func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
 	initLogger()
 
@@ -87,7 +91,23 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	config := NewVicConfig(op, configFile)
 
 	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
-	i, err := proxy.NewImageStore(plClient, config.PortlayerAddr)
+	systemProxy:= vicproxy.NewSystemProxy(plClient)
+	up := false
+	for i := 0; i < 30; i++ {
+		if systemProxy.PingPortlayer(context.Background()) {
+			up = true
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if !up {
+		msg:= "VicProvider timed out waiting for portlayer ping"
+		op.Errorf(msg)
+		return nil, fmt.Errorf(msg)
+	}
+
+	i, err := proxy.NewImageStore(plClient, config.PersonaAddr, config.PortlayerAddr)
 	if err != nil {
 		msg := "Couldn't initialize the image store"
 		op.Error(msg)
@@ -105,13 +125,18 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	}
 
 	p.imageStore = i
-	p.podProxy = proxy.NewPodProxy(plClient, config.PersonaAddr, config.PortlayerAddr, i, p.podCache)
+	p.isolationProxy = proxy.NewIsolationProxy(plClient, config.PortlayerAddr, i, p.podCache)
 
 	return &p, nil
 }
 
 func initLogger() {
-	logPath := path.Join("", constants.DefaultLogDir, LogFilename+".log")
+	var logPath string
+	if RunningInVCH {
+		logPath = path.Join("", constants.DefaultLogDir, LogFilename+".log")
+	} else {
+		logPath = path.Join("", ".", LogFilename+".log")
+	}
 
 	os.MkdirAll(constants.DefaultLogDir, 0755)
 	// #nosec: Expect file permissions to be 0600 or less
@@ -127,7 +152,7 @@ func initLogger() {
 	logcfg := viclog.NewLoggingConfig()
 
 	logcfg.SetLogLevel(DebugLevel)
-	trace.SetLoggerLevel(DebugLevel)
+	trace.SetLogLevel(DebugLevel)
 	trace.Logger.Out = writer
 
 	err = viclog.Init(logcfg)
@@ -143,7 +168,7 @@ func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 	op := trace.NewOperation(context.Background(), "CreatePod - %s", pod.Name)
 	defer trace.End(trace.Begin(pod.Name, op))
 
-	if v.podProxy == nil {
+	if v.isolationProxy == nil {
 		err := NilProxy("VicProvider.CreatePod", "PodProxy")
 		op.Error(err)
 
@@ -152,7 +177,8 @@ func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 
 	op.Infof("%s's pod spec = %#v", pod.Name, pod.Spec)
 
-	err := v.podProxy.CreatePod(op.Context, pod.Name, pod)
+	pc := NewPodCreator(v.client, v.imageStore, v.podCache, v.config.PersonaAddr, v.config.PortlayerAddr)
+	err := pc.CreatePod(op, pod.Name, pod)
 	if err != nil {
 		return err
 	}
@@ -176,7 +202,7 @@ func (v *VicProvider) GetPod(namespace, name string) (*v1.Pod, error) {
 	op := trace.NewOperation(context.Background(), "GetPod - %s", name)
 	defer trace.End(trace.Begin(name, op))
 
-	if v.podProxy == nil {
+	if v.isolationProxy == nil {
 		err := NilProxy("VicProvider.GetPod", "PodProxy")
 		op.Error(err)
 
@@ -257,7 +283,7 @@ func (v *VicProvider) GetPods() ([]*v1.Pod, error) {
 	defer trace.End(trace.Begin("GetPods", op))
 
 	op.Info("** GetPods")
-	if v.podProxy == nil {
+	if v.isolationProxy == nil {
 		err := NilProxy("VicProvider.GetPods", "PodProxy")
 		op.Error(err)
 
