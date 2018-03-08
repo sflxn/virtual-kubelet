@@ -210,7 +210,7 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, spec *v1.PodSpec
 		return err
 	}
 
-	for _, c := range spec.Containers {
+	for idx, c := range spec.Containers {
 		// Pull image config from VIC's image store if policy allows
 		var realize bool
 		if c.ImagePullPolicy == v1.PullIfNotPresent {
@@ -239,9 +239,13 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, spec *v1.PodSpec
 			return err
 		}
 
-		h, err = ip.CreateHandleTask(ctx, h, id, imgConfig.V1Image.ID, ic)
-		if err != nil {
-			return err
+		//TODO: Fix this!
+		//HACK: only create task for 1st container.  portlayer does not yet handle adding tasks for every containers.
+		if idx == 0 {
+			h, err = ip.CreateHandleTask(ctx, h, id, imgConfig.V1Image.ID, ic)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -411,17 +415,15 @@ func IsolationContainerConfigFromKubeContainer(ctx context.Context, cSpec *v1.Co
 
 	// Overwrite or append the image's config from the CLI with the metadata from the image's
 	// layer metadata where appropriate
-	config.Cmd = make([]string, len(cSpec.Command))
-	copy(config.Cmd, cSpec.Command)
-	//for _, c := range image.Config.Cmd {
-	//	config.Cmd = append(config.Cmd, c)
-	//}
+	if len(cSpec.Command) > 0 {
+		config.Cmd = make([]string, len(cSpec.Command))
+		copy(config.Cmd, cSpec.Command)
 
-	config.Args = make([]string, len(cSpec.Args))
-	copy(config.Args, cSpec.Args)
-	//for _, a := range cSpec.Args {
-	//	config.Args = append(config.Args, a)
-	//}
+		config.Cmd = append(config.Cmd, cSpec.Args...)
+	} else {
+		config.Cmd = make([]string, len(imgConfig.Config.Cmd))
+		copy(config.Cmd, imgConfig.Config.Cmd)
+	}
 
 	config.User = ""
 	if imgConfig.Config.User != "" {

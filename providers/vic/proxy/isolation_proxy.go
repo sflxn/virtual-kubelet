@@ -62,7 +62,7 @@ type IsolationContainerConfig struct {
 	Cmd        []string
 	Path       string
 	Entrypoint []string
-	Args       []string
+	//Args       []string
 	Env        []string
 	WorkingDir string
 	User       string

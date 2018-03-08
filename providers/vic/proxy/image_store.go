@@ -65,6 +65,11 @@ func (v *VicImageStore) Get(ctx context.Context, idOrRef, tag string, actuate bo
 	if err != nil && actuate {
 		err = v.PullImage(ctx, idOrRef, tag, "", "")
 		if err == nil {
+			//TODO:  Find a better way to get update imageconfig instead of this hammer
+			err := cache.InitializeImageCache(v.client)
+			if err != nil {
+				return nil, err
+			}
 			c, err = cache.ImageCache().Get(idOrRef)
 			if err != nil {
 				return nil, err
