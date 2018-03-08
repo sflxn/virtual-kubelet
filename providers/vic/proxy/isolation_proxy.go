@@ -42,6 +42,9 @@ type IsolationProxy interface {
 	AddImageToHandle(ctx context.Context, handle, deltaID, layerID, imageID, imageName string) (string, error)
 	CreateHandleTask(ctx context.Context, handle, id, layerID string, config IsolationContainerConfig) (string, error)
 	CommitHandle(ctx context.Context, handle, containerID string, waitTime int32) error
+
+	Handle(ctx context.Context, id, name string) (string, error)
+	SetState(ctx context.Context, handle, name, state string) (string, error)
 }
 
 type VicIsolationProxy struct {
@@ -87,7 +90,7 @@ const (
 	DummyRepoName = "busybox"
 
 	RunningInVCH = false
-	HostUUID = "564d3937-7e16-2efd-5b6e-6787a76fe13f"
+	HostUUID = "564d3937-7e16-2efd-5b6e-6787a76fe13f"	//HACK:  for debug only.  Replace with your VCH's UUID!
 )
 
 func NewIsolationProxy(plClient *client.PortLayer, portlayerAddr string, imageStore ImageStore, podCache cache.PodCache) IsolationProxy {
@@ -143,6 +146,29 @@ func (v *VicIsolationProxy) CreateHandle(ctx context.Context) (string, string, e
 	return id, h, nil
 }
 
+// Handle retrieves a handle to a VIC container.  Handles should be treated as opaque strings.
+//
+// returns:
+//	(handle string, error)
+func (v *VicIsolationProxy) Handle(ctx context.Context, id, name string) (string, error) {
+	if v.client == nil {
+		return "", errors.NillPortlayerClientError("ContainerProxy")
+	}
+
+	resp, err := v.client.Containers.Get(containers.NewGetParamsWithContext(ctx).WithID(id))
+	if err != nil {
+		switch err := err.(type) {
+		case *containers.GetNotFound:
+			return "", errors.NotFoundError(name)
+		case *containers.GetDefault:
+			return "", errors.InternalServerError(err.Payload.Message)
+		default:
+			return "", errors.InternalServerError(err.Error())
+		}
+	}
+	return resp.Payload, nil
+}
+
 func (v *VicIsolationProxy) AddImageToHandle(ctx context.Context, handle, deltaID, layerID, imageID, imageName string) (string, error) {
 	op := trace.FromContext(ctx, "AddImageToHandle")
 	defer trace.End(trace.Begin(handle, op))
@@ -186,7 +212,7 @@ func (v *VicIsolationProxy) CreateHandleTask(ctx context.Context, handle, id, la
 	defer trace.End(trace.Begin(handle, op))
 
 	if v.client == nil {
-		return "", errors.InternalServerError("ContainerProxy.CreateContainerTask failed to create a portlayer client")
+		return "", errors.InternalServerError("IsolationProxy.CreateContainerTask failed to create a portlayer client")
 	}
 
 	plTaskParams := IsolationContainerConfigToTask(ctx, id, layerID, config)
@@ -223,7 +249,7 @@ func (v *VicIsolationProxy) CommitHandle(ctx context.Context, handle, containerI
 	defer trace.End(trace.Begin(handle, op))
 
 	if v.client == nil {
-		return errors.NillPortlayerClientError("ContainerProxy")
+		return errors.NillPortlayerClientError("IsolationProxy")
 	}
 
 	var commitParams *containers.CommitParams
@@ -248,6 +274,32 @@ func (v *VicIsolationProxy) CommitHandle(ctx context.Context, handle, containerI
 	}
 
 	return nil
+}
+
+// SetState adds the desire state of the isolation unit once the handle is commited.
+//
+//   returns handle string and error
+func (v *VicIsolationProxy) SetState(ctx context.Context, handle, name, state string) (string, error) {
+	op := trace.FromContext(ctx, "SetState")
+	defer trace.End(trace.Begin("name", op))
+
+	if v.client == nil {
+		return "", errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	resp, err := v.client.Containers.StateChange(containers.NewStateChangeParamsWithContext(ctx).WithHandle(handle).WithState(state))
+	if err != nil {
+		switch err := err.(type) {
+		case *containers.StateChangeNotFound:
+			return "", errors.NotFoundError(name)
+		case *containers.StateChangeDefault:
+			return "", errors.InternalServerError(err.Payload.Message)
+		default:
+			return "", errors.InternalServerError(err.Error())
+		}
+	}
+
+	return resp.Payload, nil
 }
 
 //------------------------------------

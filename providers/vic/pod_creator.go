@@ -12,10 +12,11 @@ import (
 
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
+	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 	"github.com/vmware/vic/lib/apiservers/engine/errors"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
-	"github.com/vmware/vic/pkg/trace"
 	"github.com/vmware/vic/lib/metadata"
+	"github.com/vmware/vic/pkg/trace"
 
 	"k8s.io/api/core/v1"
 )
@@ -24,11 +25,12 @@ type PodCreator interface {
 }
 
 type VicPodCreator struct {
-	client        *client.PortLayer
-	imageStore    proxy.ImageStore
-	podCache      cache.PodCache
-	personaAddr   string
-	portlayerAddr string
+	client         *client.PortLayer
+	imageStore     proxy.ImageStore
+	isolationProxy proxy.IsolationProxy
+	podCache       cache.PodCache
+	personaAddr    string
+	portlayerAddr  string
 }
 
 type CreateResponse struct {
@@ -55,44 +57,56 @@ const (
 	defaultEnvPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
-func NewPodCreator(client *client.PortLayer, imageStore proxy.ImageStore, podCache cache.PodCache, personaAddr string, portlayerAddr string) *VicPodCreator {
+func NewPodCreator(client *client.PortLayer, imageStore proxy.ImageStore, isolationProxy proxy.IsolationProxy, podCache cache.PodCache, personaAddr string, portlayerAddr string) *VicPodCreator {
 	return &VicPodCreator{
-		client:        client,
-		imageStore:    imageStore,
-		podCache:      podCache,
-		personaAddr:   personaAddr,
-		portlayerAddr: portlayerAddr,
+		client:         client,
+		imageStore:     imageStore,
+		podCache:       podCache,
+		personaAddr:    personaAddr,
+		portlayerAddr:  portlayerAddr,
+		isolationProxy: isolationProxy,
 	}
 }
 
-func (v *VicPodCreator) CreatePod(ctx context.Context, name string, pod *v1.Pod) error {
+func (v *VicPodCreator) CreatePod(ctx context.Context, pod *v1.Pod, start bool) error {
 	op := trace.FromContext(ctx, "CreatePod")
 	defer trace.End(trace.Begin(pod.Name, op))
-
-	var err error
-
-	for i := 0; i < 30; i++ {
-		err = v.pingPersona(ctx)
-		if err == nil {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
 
 	// Create each container.  Only for prototype only.
 	if UsePortlayerProvisioner {
 		// Transform kube container config to docker create config
-		err := v.portlayerCreatePod(ctx, &pod.Spec)
+		id, err := v.portlayerCreatePod(ctx, pod, start)
 		if err != nil {
 			return err
 		}
 
-		err = v.podCache.Add(ctx, name, pod)
+		vp := &vicpod.VicPod{
+			ID: id,
+			Pod: pod.DeepCopy(),
+		}
+
+		err = v.podCache.Add(ctx, pod.Name, vp)
 		if err != nil {
 			//TODO:  What should we do if pod already exist?
 		}
 
+		if start {
+			ps := NewPodStarter(v.client, v.isolationProxy)
+			err := ps.Start(op, id, pod.Name)
+			if err != nil {
+				return err
+			}
+		}
 	} else {
+		var err error
+		for i := 0; i < 30; i++ {
+			err = v.pingPersona(ctx)
+			if err == nil {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+
 		for _, c := range pod.Spec.Containers {
 			createString := DummyCreateSpec(c.Image, c.Command)
 
@@ -199,18 +213,21 @@ func (v *VicPodCreator) personaPullContainer(ctx context.Context, image string) 
 	return nil
 }
 
-func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, spec *v1.PodSpec) error {
+// portlayerCreatePod creates a pod using the VIC portlayer.
+//
+//	returns id of pod as a string and error
+func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, pod *v1.Pod, start bool) (string, error) {
 	op := trace.FromContext(ctx, "portlayerCreateContainer")
 	defer trace.End(trace.Begin("", op))
 
-	ip := proxy.NewIsolationProxy(v.client, v.portlayerAddr, v.imageStore, v.podCache)
+	//ip := proxy.NewIsolationProxy(v.client, v.portlayerAddr, v.imageStore, v.podCache)
 
-	id, h, err := ip.CreateHandle(ctx)
+	id, h, err := v.isolationProxy.CreateHandle(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	for idx, c := range spec.Containers {
+	for idx, c := range pod.Spec.Containers {
 		// Pull image config from VIC's image store if policy allows
 		var realize bool
 		if c.ImagePullPolicy == v1.PullIfNotPresent {
@@ -223,7 +240,7 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, spec *v1.PodSpec
 		if err != nil {
 			err = fmt.Errorf("VicPodCreator failed to get image %s's config from the image store: %s", err.Error())
 			op.Error(err)
-			return err
+			return "", err
 		}
 
 		op.Info("** Receive image config from imagestore = %#v", imgConfig)
@@ -231,36 +248,30 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, spec *v1.PodSpec
 		// Create the initial config
 		ic, err := IsolationContainerConfigFromKubeContainer(ctx, &c, imgConfig)
 		if err != nil {
-			return err
+			return "", err
 		}
 
-		h, err = ip.AddImageToHandle(ctx, h, c.Name, imgConfig.V1Image.ID, imgConfig.ImageID, imgConfig.Name)
+		h, err = v.isolationProxy.AddImageToHandle(ctx, h, c.Name, imgConfig.V1Image.ID, imgConfig.ImageID, imgConfig.Name)
 		if err != nil {
-			return err
+			return "", err
 		}
 
 		//TODO: Fix this!
 		//HACK: only create task for 1st container.  portlayer does not yet handle adding tasks for every containers.
 		if idx == 0 {
-			h, err = ip.CreateHandleTask(ctx, h, id, imgConfig.V1Image.ID, ic)
+			h, err = v.isolationProxy.CreateHandleTask(ctx, h, id, imgConfig.V1Image.ID, ic)
 			if err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
 
-	//// HACK: injects an alpine image
-	//h, err = ip.AddImageToHandle(ctx, h, "hacked-in-alpine", "9797e5e798a034d53525968de25bd25c913e7bb17c6d068ebc778cb33e3ff6e5", "3fd9065eaf02feaf94d68376da52541925650b81698c53c6824d92ff63f98353", config)
-	//if err != nil {
-	//	return err
-	//}
-
-	err = ip.CommitHandle(ctx, h, id, -1)
+	err = v.isolationProxy.CommitHandle(ctx, h, id, -1)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return nil
+	return id, nil
 }
 
 //------------------------------------

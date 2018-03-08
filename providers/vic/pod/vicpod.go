@@ -15,16 +15,10 @@
 package pod
 
 import (
-	"fmt"
-
 	"k8s.io/api/core/v1"
 )
 
-
-func VicNameFromPod(pod *v1.Pod) string {
-	return VicName(pod.Namespace, pod.Name)
-}
-
-func VicName(namespace, name string) string {
-	return fmt.Sprintf("pod-%s-%s", namespace, name)
+type VicPod struct {
+	ID  string
+	Pod *v1.Pod
 }

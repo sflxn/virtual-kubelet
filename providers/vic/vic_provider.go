@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/context"
@@ -31,8 +32,6 @@ import (
 	"github.com/vmware/vic/pkg/dio"
 	viclog "github.com/vmware/vic/pkg/log"
 	"github.com/vmware/vic/pkg/trace"
-
-	"syscall"
 
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
@@ -168,20 +167,15 @@ func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 	op := trace.NewOperation(context.Background(), "CreatePod - %s", pod.Name)
 	defer trace.End(trace.Begin(pod.Name, op))
 
-	if v.isolationProxy == nil {
-		err := NilProxy("VicProvider.CreatePod", "PodProxy")
-		op.Error(err)
-
-		return err
-	}
-
 	op.Infof("%s's pod spec = %#v", pod.Name, pod.Spec)
 
-	pc := NewPodCreator(v.client, v.imageStore, v.podCache, v.config.PersonaAddr, v.config.PortlayerAddr)
-	err := pc.CreatePod(op, pod.Name, pod)
+	pc := NewPodCreator(v.client, v.imageStore, v.isolationProxy, v.podCache, v.config.PersonaAddr, v.config.PortlayerAddr)
+	err := pc.CreatePod(op, pod, true)
 	if err != nil {
 		return err
 	}
+
+	//v.resourceManager.AddPod()
 
 	op.Infof("** pod created ok")
 	return nil
@@ -202,20 +196,13 @@ func (v *VicProvider) GetPod(namespace, name string) (*v1.Pod, error) {
 	op := trace.NewOperation(context.Background(), "GetPod - %s", name)
 	defer trace.End(trace.Begin(name, op))
 
-	if v.isolationProxy == nil {
-		err := NilProxy("VicProvider.GetPod", "PodProxy")
-		op.Error(err)
-
-		return nil, err
-	}
-
 	// Look for the pod in our cache of running pods
-	pod, err := v.podCache.Get(op.Context, namespace, name)
+	vp, err := v.podCache.Get(op.Context, namespace, name)
 	if err != nil {
 		return nil, err
 	}
 
-	return pod, nil
+	return vp.Pod, nil
 }
 
 // GetContainerLogs retrieves the logs of a container by name from the provider.
@@ -282,15 +269,11 @@ func (v *VicProvider) GetPods() ([]*v1.Pod, error) {
 	op := trace.NewOperation(context.Background(), "GetPods")
 	defer trace.End(trace.Begin("GetPods", op))
 
-	op.Info("** GetPods")
-	if v.isolationProxy == nil {
-		err := NilProxy("VicProvider.GetPods", "PodProxy")
-		op.Error(err)
-
-		return nil, err
+	vps := v.podCache.GetAll(op.Context)
+	allPods := make([]*v1.Pod, 0)
+	for _, vp := range vps {
+		allPods = append(allPods, vp.Pod)
 	}
-
-	allPods := v.podCache.GetAll(op.Context)
 
 	return allPods, nil
 }

@@ -19,29 +19,27 @@ import (
 	"fmt"
 	"sync"
 
-	"k8s.io/api/core/v1"
-
 	"github.com/vmware/vic/pkg/trace"
 
-	//vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
+	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 )
 
 type PodCache interface {
-	Get(ctx context.Context, namespace, name string) (*v1.Pod, error)
-	GetAll(ctx context.Context) []*v1.Pod
-	Add(ctx context.Context, vicName string, pod *v1.Pod) error
-	Delete(ctx context.Context, vicName string)
+	Get(ctx context.Context, namespace, name string) (*vicpod.VicPod, error)
+	GetAll(ctx context.Context) []*vicpod.VicPod
+	Add(ctx context.Context, name string, pod *vicpod.VicPod) error
+	Delete(ctx context.Context, name string)
 }
 
 type VicPodCache struct {
-	cache map[string]*v1.Pod
+	cache map[string]*vicpod.VicPod
 	lock  sync.Mutex
 }
 
 func NewVicPodCache() PodCache {
 	v := &VicPodCache{}
 
-	v.cache = make(map[string]*v1.Pod, 0)
+	v.cache = make(map[string]*vicpod.VicPod, 0)
 
 	return v
 }
@@ -50,7 +48,7 @@ func (v *VicPodCache) Rehydrate(ctx context.Context) error {
 	return nil
 }
 
-func (v *VicPodCache) Get(ctx context.Context, namespace, name string) (*v1.Pod, error) {
+func (v *VicPodCache) Get(ctx context.Context, namespace, name string) (*vicpod.VicPod, error) {
 	op := trace.FromContext(ctx, "Get")
 	defer trace.End(trace.Begin(name, op))
 
@@ -67,42 +65,44 @@ func (v *VicPodCache) Get(ctx context.Context, namespace, name string) (*v1.Pod,
 	return pod, nil
 }
 
-func (v *VicPodCache) GetAll(ctx context.Context) []*v1.Pod {
+func (v *VicPodCache) GetAll(ctx context.Context) []*vicpod.VicPod {
 	op := trace.FromContext(ctx, "GetAll")
 	defer trace.End(trace.Begin("", op))
+	defer v.lock.Unlock()
+	v.lock.Lock()
 
-	list := make([]*v1.Pod, 0)
+	list := make([]*vicpod.VicPod, 0)
 
-	for _, pod := range v.cache {
-		list = append(list, pod)
+	for _, vp := range v.cache {
+		list = append(list, vp)
 	}
 
 	return list
 }
 
-func (v *VicPodCache) Add(ctx context.Context, vicName string, pod *v1.Pod) error {
+func (v *VicPodCache) Add(ctx context.Context, name string, pod *vicpod.VicPod) error {
 	op := trace.FromContext(ctx, "Add")
-	defer trace.End(trace.Begin(pod.Name, op))
+	defer trace.End(trace.Begin(name, op))
 	defer v.lock.Unlock()
 	v.lock.Lock()
 
-	_, ok := v.cache[vicName]
+	_, ok := v.cache[name]
 	if ok {
-		err := fmt.Errorf("Pod %s already cached.  Duplicate pod.", pod.Name)
+		err := fmt.Errorf("Pod %s already cached.  Duplicate pod.", name)
 
 		op.Error(err)
 		return err
 	}
 
-	v.cache[vicName] = pod
+	v.cache[name] = pod
 	return nil
 }
 
-func (v *VicPodCache) Delete(ctx context.Context, vicName string) {
+func (v *VicPodCache) Delete(ctx context.Context, name string) {
 	op := trace.FromContext(ctx, "Delete")
-	defer trace.End(trace.Begin(vicName, op))
+	defer trace.End(trace.Begin(name, op))
 	defer v.lock.Unlock()
 	v.lock.Lock()
 
-	delete(v.cache, vicName)
+	delete(v.cache, name)
 }
