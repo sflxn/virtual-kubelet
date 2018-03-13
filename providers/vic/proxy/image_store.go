@@ -57,12 +57,12 @@ func NewImageStore(plClient *client.PortLayer, personaAddr, portlayerAddr string
 
 // Get returns an ImageConfig.  If the config is not cached, VicImageStore can request
 // imagec to pull the image if actuate is set to true.
-func (v *VicImageStore) Get(ctx context.Context, idOrRef, tag string, actuate bool) (*metadata.ImageConfig, error) {
+func (v *VicImageStore) Get(ctx context.Context, idOrRef, tag string, realize bool) (*metadata.ImageConfig, error) {
 	op := trace.FromContext(ctx, "Get - %s:%s", idOrRef, tag)
 	defer trace.End(trace.Begin("", op))
 
 	c, err := cache.ImageCache().Get(idOrRef)
-	if err != nil && actuate {
+	if err != nil && realize {
 		err = v.PullImage(ctx, idOrRef, tag, "", "")
 		if err == nil {
 			//TODO:  Find a better way to get update imageconfig instead of this hammer

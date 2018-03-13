@@ -183,11 +183,15 @@ func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 
 // UpdatePod takes a Kubernetes Pod and updates it within the provider.
 func (v *VicProvider) UpdatePod(pod *v1.Pod) error {
+	op := trace.NewOperation(context.Background(), "UpdatePod - %s", pod.Name)
+	defer trace.End(trace.Begin(pod.Name, op))
 	return nil
 }
 
 // DeletePod takes a Kubernetes Pod and deletes it from the provider.
 func (v *VicProvider) DeletePod(pod *v1.Pod) error {
+	op := trace.NewOperation(context.Background(), "DeletePod - %s", pod.Name)
+	defer trace.End(trace.Begin(pod.Name, op))
 	return nil
 }
 

@@ -22,6 +22,8 @@ import (
 
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/containers"
+	"github.com/vmware/vic/lib/apiservers/portlayer/client/interaction"
+	"github.com/vmware/vic/lib/apiservers/portlayer/client/logging"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/storage"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/tasks"
 	//"github.com/vmware/vic/lib/apiservers/engine/backends/convert"
@@ -41,6 +43,8 @@ type IsolationProxy interface {
 	CreateHandle(ctx context.Context) (string, string, error)
 	AddImageToHandle(ctx context.Context, handle, deltaID, layerID, imageID, imageName string) (string, error)
 	CreateHandleTask(ctx context.Context, handle, id, layerID string, config IsolationContainerConfig) (string, error)
+	AddInteractionToHandle(ctx context.Context, handle string) (string, error)
+	AddLoggingToHandle(ctx context.Context, handle string) (string, error)
 	CommitHandle(ctx context.Context, handle, containerID string, waitTime int32) error
 
 	Handle(ctx context.Context, id, name string) (string, error)
@@ -215,9 +219,12 @@ func (v *VicIsolationProxy) CreateHandleTask(ctx context.Context, handle, id, la
 		return "", errors.InternalServerError("IsolationProxy.CreateContainerTask failed to create a portlayer client")
 	}
 
+	op.Infof("*** CreateHandleTask - %#v", config)
+
 	plTaskParams := IsolationContainerConfigToTask(ctx, id, layerID, config)
 	plTaskParams.Config.Handle = handle
 
+	op.Infof("*** CreateContainerTask - params = %#v", *plTaskParams.Config)
 	responseJoin, err := v.client.Tasks.Join(plTaskParams)
 	if err != nil {
 		op.Errorf("Unable to join primary task to container: %+v", err)
@@ -239,6 +246,61 @@ func (v *VicIsolationProxy) CreateHandleTask(ctx context.Context, handle, id, la
 	handle, ok = responseBind.Payload.Handle.(string)
 	if !ok {
 		return "", errors.InternalServerError(fmt.Sprintf("Type assertion failed on handle from task bind %#+v", handle))
+	}
+
+	return handle, nil
+}
+
+// AddLoggingToHandle adds logging capability to the isolation vm, referenced by handle.
+// If an error is return, the returned handle should not be used.
+//
+// returns:
+//	modified handle
+func (v *VicIsolationProxy) AddLoggingToHandle(ctx context.Context, handle string) (string, error) {
+	op := trace.FromContext(ctx, "CommitHandle")
+	defer trace.End(trace.Begin(handle, op))
+
+	if v.client == nil {
+		return "", errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	response, err := v.client.Logging.LoggingJoin(logging.NewLoggingJoinParamsWithContext(ctx).
+		WithConfig(&models.LoggingJoinConfig{
+		Handle: handle,
+	}))
+	if err != nil {
+		return "", errors.InternalServerError(err.Error())
+	}
+	handle, ok := response.Payload.Handle.(string)
+	if !ok {
+		return "", errors.InternalServerError(fmt.Sprintf("Type assertion failed for %#+v", handle))
+	}
+
+	return handle, nil
+}
+
+// AddInteractionToContainer adds interaction capabilities to a container, referenced by handle.
+// If an error is return, the returned handle should not be used.
+//
+// returns:
+//	modified handle
+func (v *VicIsolationProxy) AddInteractionToHandle(ctx context.Context, handle string) (string, error) {
+	defer trace.End(trace.Begin(handle))
+
+	if v.client == nil {
+		return "", errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	response, err := v.client.Interaction.InteractionJoin(interaction.NewInteractionJoinParamsWithContext(ctx).
+		WithConfig(&models.InteractionJoinConfig{
+		Handle: handle,
+	}))
+	if err != nil {
+		return "", errors.InternalServerError(err.Error())
+	}
+	handle, ok := response.Payload.Handle.(string)
+	if !ok {
+		return "", errors.InternalServerError(fmt.Sprintf("Type assertion failed for %#+v", handle))
 	}
 
 	return handle, nil

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
-	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 	"github.com/vmware/vic/lib/apiservers/engine/errors"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/metadata"
@@ -77,11 +77,12 @@ func (v *VicPodCreator) CreatePod(ctx context.Context, pod *v1.Pod, start bool) 
 		// Transform kube container config to docker create config
 		id, err := v.portlayerCreatePod(ctx, pod, start)
 		if err != nil {
+			op.Errorf("pod_creator failed to create pod: %s", err.Error())
 			return err
 		}
 
 		vp := &vicpod.VicPod{
-			ID: id,
+			ID:  id,
 			Pod: pod.DeepCopy(),
 		}
 
@@ -251,18 +252,34 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, pod *v1.Pod, sta
 			return "", err
 		}
 
+		op.Infof("isolation config %#v", imgConfig)
+
 		h, err = v.isolationProxy.AddImageToHandle(ctx, h, c.Name, imgConfig.V1Image.ID, imgConfig.ImageID, imgConfig.Name)
 		if err != nil {
 			return "", err
 		}
 
 		//TODO: Fix this!
-		//HACK: only create task for 1st container.  portlayer does not yet handle adding tasks for every containers.
+		//HACK: We need one task with the container ID as the portlayer uses this to track session.  Longer term, we should figure out
+		//	a way to fix this in the portlayer?
 		if idx == 0 {
 			h, err = v.isolationProxy.CreateHandleTask(ctx, h, id, imgConfig.V1Image.ID, ic)
-			if err != nil {
-				return "", err
-			}
+		} else {
+			h, err = v.isolationProxy.CreateHandleTask(ctx, h, fmt.Sprintf("Container-%d-task", idx), imgConfig.V1Image.ID, ic)
+		}
+		if err != nil {
+			return "", err
+		}
+
+		// Need both interaction and logging added or we will not be able to retrieve output.log or tether.debug
+		h, err = v.isolationProxy.AddInteractionToHandle(ctx, h)
+		if err != nil {
+			return "", err
+		}
+
+		h, err = v.isolationProxy.AddLoggingToHandle(ctx, h)
+		if err != nil {
+			return "", err
 		}
 	}
 
