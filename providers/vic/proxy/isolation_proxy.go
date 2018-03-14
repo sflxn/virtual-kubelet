@@ -15,15 +15,16 @@
 package proxy
 
 import (
-	"bytes"
+	//"bytes"
 	"context"
-	"encoding/json"
+	//"encoding/json"
 	"fmt"
 
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/containers"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/interaction"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/logging"
+	"github.com/vmware/vic/lib/apiservers/portlayer/client/scopes"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/storage"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client/tasks"
 	//"github.com/vmware/vic/lib/apiservers/engine/backends/convert"
@@ -33,9 +34,10 @@ import (
 	"github.com/vmware/vic/pkg/trace"
 
 	"github.com/docker/docker/api/types/strslice"
-	"github.com/moby/moby/api/types"
+	//"github.com/moby/moby/api/types"
 
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/constants"
 	"github.com/vmware/vic/pkg/vsphere/sys"
 )
 
@@ -43,6 +45,7 @@ type IsolationProxy interface {
 	CreateHandle(ctx context.Context) (string, string, error)
 	AddImageToHandle(ctx context.Context, handle, deltaID, layerID, imageID, imageName string) (string, error)
 	CreateHandleTask(ctx context.Context, handle, id, layerID string, config IsolationContainerConfig) (string, error)
+	AddHandleToScope(ctx context.Context, handle string, config IsolationContainerConfig) (string, error)
 	AddInteractionToHandle(ctx context.Context, handle string) (string, error)
 	AddLoggingToHandle(ctx context.Context, handle string) (string, error)
 	CommitHandle(ctx context.Context, handle, containerID string, waitTime int32) error
@@ -58,12 +61,17 @@ type VicIsolationProxy struct {
 	portlayerAddr string
 }
 
+type PortBinding struct {
+	HostIP   string
+	HostPort string
+}
+
 type IsolationContainerConfig struct {
 	ID        string
 	ImageID   string
 	LayerID   string
 	ImageName string
-	Name	  string
+	Name      string
 	Namespace string
 
 	Cmd        []string
@@ -81,7 +89,9 @@ type IsolationContainerConfig struct {
 	Tty       bool
 
 	CPUCount int64
-	Memory int64
+	Memory   int64
+
+	PortMap map[string]PortBinding
 }
 
 const (
@@ -92,9 +102,6 @@ const (
 	DummyImage    = "f6e427c148a766d2d6c117d67359a0aa7d133b5bc05830a7ff6e8b64ff6b1d1d" //busybox
 	DummyLayerID  = "02d3847f0b0fb7acd4419040cc53febf91cb112db2451d9b27a245dee5b227c0" //busybox
 	DummyRepoName = "busybox"
-
-	RunningInVCH = false
-	HostUUID = "564d3937-7e16-2efd-5b6e-6787a76fe13f"	//HACK:  for debug only.  Replace with your VCH's UUID!
 )
 
 func NewIsolationProxy(plClient *client.PortLayer, portlayerAddr string, imageStore ImageStore, podCache cache.PodCache) IsolationProxy {
@@ -121,10 +128,10 @@ func (v *VicIsolationProxy) CreateHandle(ctx context.Context) (string, string, e
 	// Call the Exec port layer to create the container
 	var err error
 	var host string
-	if RunningInVCH {
+	if constants.RunningInVCH {
 		host, err = sys.UUID()
 	} else {
-		host = HostUUID
+		host = constants.HostUUID
 		err = nil
 	}
 	if err != nil {
@@ -183,10 +190,10 @@ func (v *VicIsolationProxy) AddImageToHandle(ctx context.Context, handle, deltaI
 
 	var err error
 	var host string
-	if RunningInVCH {
+	if constants.RunningInVCH {
 		host, err = sys.UUID()
 	} else {
-		host = HostUUID
+		host = constants.HostUUID
 		err = nil
 	}
 	if err != nil {
@@ -251,6 +258,50 @@ func (v *VicIsolationProxy) CreateHandleTask(ctx context.Context, handle, id, la
 	return handle, nil
 }
 
+// AddHandleToScope adds a container, referenced by handle, to a scope.
+// If an error is return, the returned handle should not be used.
+//
+// returns:
+//	modified handle
+func (v *VicIsolationProxy) AddHandleToScope(ctx context.Context, handle string, config IsolationContainerConfig) (string, error) {
+	op := trace.FromContext(ctx, "CommitHandle")
+	defer trace.End(trace.Begin(handle, op))
+
+	if v.client == nil {
+		return "", errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	// configure network
+	netConf := networkConfigFromIsolationConfig(config)
+	if netConf != nil {
+		addContRes, err := v.client.Scopes.AddContainer(scopes.NewAddContainerParamsWithContext(ctx).
+			WithScope(netConf.NetworkName).
+			WithConfig(&models.ScopesAddContainerConfig{
+			Handle:        handle,
+			NetworkConfig: netConf,
+		}))
+
+		if err != nil {
+			op.Errorf("ContainerProxy.AddContainerToScope: Scopes error: %s", err.Error())
+			return handle, errors.InternalServerError(err.Error())
+		}
+
+		defer func() {
+			if err == nil {
+				return
+			}
+			// roll back the AddContainer call
+			if _, err2 := v.client.Scopes.RemoveContainer(scopes.NewRemoveContainerParamsWithContext(ctx).WithHandle(handle).WithScope(netConf.NetworkName)); err2 != nil {
+				op.Warnf("could not roll back container add: %s", err2)
+			}
+		}()
+
+		handle = addContRes.Payload
+	}
+
+	return handle, nil
+}
+
 // AddLoggingToHandle adds logging capability to the isolation vm, referenced by handle.
 // If an error is return, the returned handle should not be used.
 //
@@ -266,8 +317,8 @@ func (v *VicIsolationProxy) AddLoggingToHandle(ctx context.Context, handle strin
 
 	response, err := v.client.Logging.LoggingJoin(logging.NewLoggingJoinParamsWithContext(ctx).
 		WithConfig(&models.LoggingJoinConfig{
-		Handle: handle,
-	}))
+			Handle: handle,
+		}))
 	if err != nil {
 		return "", errors.InternalServerError(err.Error())
 	}
@@ -293,8 +344,8 @@ func (v *VicIsolationProxy) AddInteractionToHandle(ctx context.Context, handle s
 
 	response, err := v.client.Interaction.InteractionJoin(interaction.NewInteractionJoinParamsWithContext(ctx).
 		WithConfig(&models.InteractionJoinConfig{
-		Handle: handle,
-	}))
+			Handle: handle,
+		}))
 	if err != nil {
 		return "", errors.InternalServerError(err.Error())
 	}
@@ -426,17 +477,6 @@ func IsolationContainerConfigToTask(ctx context.Context, id, layerID string, ic 
 	return tasks.NewJoinParamsWithContext(ctx).WithConfig(config)
 }
 
-func CreateConfigToString(config types.ContainerCreateConfig) (string, error) {
-	buf := bytes.NewBufferString("")
-	encoder := json.NewEncoder(buf)
-	err := encoder.Encode(config)
-	if err != nil {
-		return "", err
-	}
-
-	return buf.String(), nil
-}
-
 // initIsolationConfig returns a default config used to create the isolation unit handle
 func initIsolationConfig(ctx context.Context, name, repoName, imageID, layerID, imageStore string) *containers.CreateParams {
 	op := trace.NewOperation(context.Background(), "IsolationConfig - %s", name)
@@ -472,4 +512,17 @@ func initIsolationConfig(ctx context.Context, name, repoName, imageID, layerID, 
 	op.Debugf("dockerContainerCreateParamsToPortlayer = %+v", config)
 
 	return containers.NewCreateParamsWithContext(ctx).WithCreateConfig(config)
+}
+
+//HACK:  hard code for socat and nginx
+func networkConfigFromIsolationConfig(config IsolationContainerConfig) *models.NetworkConfig {
+	nc := &models.NetworkConfig{
+		NetworkName: "default",
+	}
+
+	for key, val := range config.PortMap {
+		nc.Ports = append(nc.Ports, fmt.Sprintf("%s:%s", val.HostPort, key))
+	}
+
+	return nc
 }

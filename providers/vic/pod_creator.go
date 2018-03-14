@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/constants"
 	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 	"github.com/vmware/vic/lib/apiservers/engine/errors"
@@ -52,8 +53,6 @@ const (
 	DefaultMemory = 512
 	MiBytesUnit   = 1024 * 1024
 
-	UsePortlayerProvisioner = true
-
 	defaultEnvPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
@@ -73,7 +72,7 @@ func (v *VicPodCreator) CreatePod(ctx context.Context, pod *v1.Pod, start bool) 
 	defer trace.End(trace.Begin(pod.Name, op))
 
 	// Create each container.  Only for prototype only.
-	if UsePortlayerProvisioner {
+	if constants.UsePortlayerProvisioner {
 		// Transform kube container config to docker create config
 		id, err := v.portlayerCreatePod(ctx, pod, start)
 		if err != nil {
@@ -247,7 +246,7 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, pod *v1.Pod, sta
 		op.Info("** Receive image config from imagestore = %#v", imgConfig)
 
 		// Create the initial config
-		ic, err := IsolationContainerConfigFromKubeContainer(ctx, &c, imgConfig)
+		ic, err := IsolationContainerConfigFromKubeContainer(ctx, &c, imgConfig, pod)
 		if err != nil {
 			return "", err
 		}
@@ -270,6 +269,11 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, pod *v1.Pod, sta
 		if err != nil {
 			return "", err
 		}
+
+		//h, err = v.isolationProxy.AddHandleToScope(ctx, h, ic)
+		//if err != nil {
+		//	return id, err
+		//}
 
 		// Need both interaction and logging added or we will not be able to retrieve output.log or tether.debug
 		h, err = v.isolationProxy.AddInteractionToHandle(ctx, h)
@@ -426,7 +430,7 @@ func DummyCreateSpec(image string, cmd []string) string {
 	return config
 }
 
-func IsolationContainerConfigFromKubeContainer(ctx context.Context, cSpec *v1.Container, imgConfig *metadata.ImageConfig) (proxy.IsolationContainerConfig, error) {
+func IsolationContainerConfigFromKubeContainer(ctx context.Context, cSpec *v1.Container, imgConfig *metadata.ImageConfig, pod *v1.Pod) (proxy.IsolationContainerConfig, error) {
 	op := trace.FromContext(ctx, "portlayerCreateContainer")
 	defer trace.End(trace.Begin("", op))
 
@@ -437,6 +441,7 @@ func IsolationContainerConfigFromKubeContainer(ctx context.Context, cSpec *v1.Co
 		Tty:        cSpec.TTY,
 		StdinOnce:  cSpec.StdinOnce,
 		OpenStdin:  cSpec.Stdin,
+		PortMap:    make(map[string]proxy.PortBinding, 0),
 	}
 
 	setResourceFromKubeSpec(ctx, &config, cSpec)
@@ -460,6 +465,41 @@ func IsolationContainerConfigFromKubeContainer(ctx context.Context, cSpec *v1.Co
 
 	// set up environment
 	config.Env = setEnvFromImageConfig(config.Tty, config.Env, imgConfig.Config.Env)
+
+	// HACK:  get the exposed ports in the annotation to open up for demo purposes.
+	//var exPort, hostPort, hostIP string
+	//op.Infof("annotation = %#v", pod.Annotations)
+	//if cSpec.Image == "socat" {
+	//	for key, val := range pod.Annotations {
+	//		switch key {
+	//		case "socat.external":
+	//			exPort = val
+	//		case "socat.internal":
+	//			hostPort = val
+	//		case "socat.ip":
+	//			hostIP = val
+	//		}
+	//	}
+	//	config.PortMap[exPort] = proxy.PortBinding{
+	//		HostIP:   hostIP,
+	//		HostPort: hostPort,
+	//	}
+	//} else if cSpec.Image == "nginx" {
+	//	for key, val := range pod.Annotations {
+	//		switch key {
+	//		case "nginx.external":
+	//			exPort = val
+	//		case "nginx.internal":
+	//			hostPort = val
+	//		case "nginx.ip":
+	//			hostIP = val
+	//		}
+	//	}
+	//	config.PortMap[exPort] = proxy.PortBinding{
+	//		HostIP:   hostIP,
+	//		HostPort: hostPort,
+	//	}
+	//}
 
 	op.Infof("config = %#v", config)
 

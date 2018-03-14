@@ -28,13 +28,14 @@ import (
 	vicproxy "github.com/vmware/vic/lib/apiservers/engine/proxy"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/apiservers/portlayer/models"
-	"github.com/vmware/vic/lib/constants"
+	vicconst "github.com/vmware/vic/lib/constants"
 	"github.com/vmware/vic/pkg/dio"
 	viclog "github.com/vmware/vic/pkg/log"
 	"github.com/vmware/vic/pkg/trace"
 
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/constants"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -49,15 +50,14 @@ type VicProvider struct {
 	config          VicConfig
 	podCache        cache.PodCache
 
-	client      *client.PortLayer
-	imageStore  proxy.ImageStore
-	isolationProxy    proxy.IsolationProxy
-	systemProxy vicproxy.VicSystemProxy
+	client         *client.PortLayer
+	imageStore     proxy.ImageStore
+	isolationProxy proxy.IsolationProxy
+	systemProxy    vicproxy.VicSystemProxy
 }
 
 const (
-	RunningInVCH = false
-	LogFilename  = "virtual-kubelet"
+	LogFilename = "virtual-kubelet"
 
 	// PanicLevel level, highest level of severity. Logs and then calls panic with the
 	// message passed to Debug, Info, ...
@@ -88,9 +88,10 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	defer trace.End(trace.Begin("", op))
 
 	config := NewVicConfig(op, configFile)
+	op.Infof("Provider config = %#v", config)
 
 	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
-	systemProxy:= vicproxy.NewSystemProxy(plClient)
+	systemProxy := vicproxy.NewSystemProxy(plClient)
 	up := false
 	for i := 0; i < 30; i++ {
 		if systemProxy.PingPortlayer(context.Background()) {
@@ -101,7 +102,7 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	}
 
 	if !up {
-		msg:= "VicProvider timed out waiting for portlayer ping"
+		msg := "VicProvider timed out waiting for portlayer ping"
 		op.Errorf(msg)
 		return nil, fmt.Errorf(msg)
 	}
@@ -113,6 +114,7 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 		return nil, fmt.Errorf(msg)
 	}
 
+	op.Infof("** creating proxy")
 	p := VicProvider{
 		config:          config,
 		nodeName:        nodeName,
@@ -125,19 +127,20 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 
 	p.imageStore = i
 	p.isolationProxy = proxy.NewIsolationProxy(plClient, config.PortlayerAddr, i, p.podCache)
+	op.Infof("** ready to go")
 
 	return &p, nil
 }
 
 func initLogger() {
 	var logPath string
-	if RunningInVCH {
-		logPath = path.Join("", constants.DefaultLogDir, LogFilename+".log")
+	if constants.RunningInVCH {
+		logPath = path.Join("", vicconst.DefaultLogDir, LogFilename+".log")
 	} else {
 		logPath = path.Join("", ".", LogFilename+".log")
 	}
 
-	os.MkdirAll(constants.DefaultLogDir, 0755)
+	os.MkdirAll(vicconst.DefaultLogDir, 0755)
 	// #nosec: Expect file permissions to be 0600 or less
 	f, err := os.OpenFile(logPath, os.O_RDWR|os.O_CREATE|os.O_APPEND|os.O_SYNC|syscall.O_NOCTTY, 0644)
 	if err != nil {
@@ -287,29 +290,29 @@ func (v *VicProvider) Capacity() v1.ResourceList {
 	op := trace.NewOperation(context.Background(), "VicProvider.Capacity")
 	defer trace.End(trace.Begin("", op))
 
-	if RunningInVCH {
-		if v.systemProxy == nil {
-			err := NilProxy("VicProvider.Capacity", "SystemProxy")
-			op.Error(err)
-
-			return v1.ResourceList{}
-		}
-
-		info, err := v.systemProxy.VCHInfo(context.Background())
-		if err != nil {
-			op.Errorf("VicProvider.Capacity failed to get vchinfo: %s", err.Error())
-			return v1.ResourceList{}
-		}
-
-		return KubeResourcesFromVchInfo(info)
-	} else {
+	//if constants.RunningInVCH {
+	//	if v.systemProxy == nil {
+	//		err := NilProxy("VicProvider.Capacity", "SystemProxy")
+	//		op.Error(err)
+	//
+	//		return v1.ResourceList{}
+	//	}
+	//
+	//	info, err := v.systemProxy.VCHInfo(context.Background())
+	//	if err != nil {
+	//		op.Errorf("VicProvider.Capacity failed to get vchinfo: %s", err.Error())
+	//		return v1.ResourceList{}
+	//	}
+	//
+	//	return KubeResourcesFromVchInfo(info)
+	//} else {
 		// Return fake data
 		return v1.ResourceList{
 			"cpu":    resource.MustParse("20"),
 			"memory": resource.MustParse("100Gi"),
 			"pods":   resource.MustParse("20"),
 		}
-	}
+	//}
 }
 
 // NodeConditions returns a list of conditions (Ready, OutOfDisk, etc), which is polled periodically to update the node status
