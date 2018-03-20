@@ -43,17 +43,34 @@ func (v *VicPodStarter) Start(ctx context.Context, id, name string) error {
 	op := trace.FromContext(ctx, "Start")
 	defer trace.End(trace.Begin(name, op))
 
-	handle, err := v.isolationProxy.Handle(ctx, id, name)
+	h, err := v.isolationProxy.Handle(ctx, id, name)
 	if err != nil {
 		return err
 	}
 
-	handle, err = v.isolationProxy.SetState(ctx, handle, name, "RUNNING")
+	// Bind the container to the scope
+	h, ep, err := v.isolationProxy.BindScope(ctx, h, name)
 	if err != nil {
 		return err
 	}
 
-	err = v.isolationProxy.CommitHandle(ctx, handle, id, -1)
+	op.Infof("*** Scope bind returned endpoints %#v", ep)
+
+	defer func() {
+		if err != nil {
+			op.Debugf("Unbinding %s due to error - %s", id, err.Error())
+			v.isolationProxy.UnbindScope(ctx, h, name)
+		}
+	}()
+
+	h, err = v.isolationProxy.SetState(ctx, h, name, "RUNNING")
+	if err != nil {
+		return err
+	}
+
+	// map ports
+
+	err = v.isolationProxy.CommitHandle(ctx, h, id, -1)
 
 	return nil
 }

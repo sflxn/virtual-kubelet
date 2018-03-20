@@ -1,3 +1,17 @@
+// Copyright 2018 VMware, Inc. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package vic
 
 import (
@@ -23,6 +37,7 @@ import (
 )
 
 type PodCreator interface {
+	CreatePod(ctx context.Context, pod *v1.Pod, start bool) error
 }
 
 type VicPodCreator struct {
@@ -99,14 +114,6 @@ func (v *VicPodCreator) CreatePod(ctx context.Context, pod *v1.Pod, start bool) 
 		}
 	} else {
 		var err error
-		for i := 0; i < 30; i++ {
-			err = v.pingPersona(ctx)
-			if err == nil {
-				break
-			}
-			time.Sleep(1 * time.Second)
-		}
-
 		for _, c := range pod.Spec.Containers {
 			createString := DummyCreateSpec(c.Image, c.Command)
 
@@ -123,24 +130,6 @@ func (v *VicPodCreator) CreatePod(ctx context.Context, pod *v1.Pod, start bool) 
 				}
 			}
 		}
-	}
-
-	return nil
-}
-
-func (v *VicPodCreator) pingPersona(ctx context.Context) error {
-	op := trace.FromContext(ctx, "CreatePod")
-
-	personaServer := fmt.Sprintf("http://%s/v1.35/info", v.personaAddr)
-	resp, err := http.Get(personaServer)
-	if err != nil {
-		op.Errorf("Ping failed: error = %s", err.Error())
-		return err
-	}
-
-	if resp.StatusCode >= 300 {
-		op.Errorf("Ping failed: status = %d", resp.StatusCode)
-		return fmt.Errorf("Server Error")
 	}
 
 	return nil
@@ -238,7 +227,12 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, pod *v1.Pod, sta
 
 		imgConfig, err := v.imageStore.Get(op.Context, c.Image, "", realize)
 		if err != nil {
-			err = fmt.Errorf("VicPodCreator failed to get image %s's config from the image store: %s", err.Error())
+			err = fmt.Errorf("VicPodCreator failed to get image %s's config from the image store: %s", c.Image, err.Error())
+			op.Error(err)
+			return "", err
+		}
+		if imgConfig == nil {
+			err = fmt.Errorf("VicPodCreator failed to get image %s's config from the image store", c.Image)
 			op.Error(err)
 			return "", err
 		}
@@ -270,21 +264,21 @@ func (v *VicPodCreator) portlayerCreatePod(ctx context.Context, pod *v1.Pod, sta
 			return "", err
 		}
 
-		//h, err = v.isolationProxy.AddHandleToScope(ctx, h, ic)
-		//if err != nil {
-		//	return id, err
-		//}
-
-		// Need both interaction and logging added or we will not be able to retrieve output.log or tether.debug
-		h, err = v.isolationProxy.AddInteractionToHandle(ctx, h)
+		h, err = v.isolationProxy.AddHandleToScope(ctx, h, ic)
 		if err != nil {
-			return "", err
+			return id, err
 		}
+	}
 
-		h, err = v.isolationProxy.AddLoggingToHandle(ctx, h)
-		if err != nil {
-			return "", err
-		}
+	// Need both interaction and logging added or we will not be able to retrieve output.log or tether.debug
+	h, err = v.isolationProxy.AddInteractionToHandle(ctx, h)
+	if err != nil {
+		return "", err
+	}
+
+	h, err = v.isolationProxy.AddLoggingToHandle(ctx, h)
+	if err != nil {
+		return "", err
 	}
 
 	err = v.isolationProxy.CommitHandle(ctx, h, id, -1)
@@ -434,6 +428,7 @@ func IsolationContainerConfigFromKubeContainer(ctx context.Context, cSpec *v1.Co
 	op := trace.FromContext(ctx, "portlayerCreateContainer")
 	defer trace.End(trace.Begin("", op))
 
+	op.Infof("** IsolationContainerConfig... imgConfig = %#v", imgConfig)
 	config := proxy.IsolationContainerConfig{
 		Name:       cSpec.Name,
 		WorkingDir: cSpec.WorkingDir,
@@ -466,7 +461,7 @@ func IsolationContainerConfigFromKubeContainer(ctx context.Context, cSpec *v1.Co
 	// set up environment
 	config.Env = setEnvFromImageConfig(config.Tty, config.Env, imgConfig.Config.Env)
 
-	// HACK:  get the exposed ports in the annotation to open up for demo purposes.
+	//// HACK:  get the exposed ports in the annotation to open up for demo purposes.
 	//var exPort, hostPort, hostIP string
 	//op.Infof("annotation = %#v", pod.Annotations)
 	//if cSpec.Image == "socat" {

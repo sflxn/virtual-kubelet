@@ -31,12 +31,14 @@ import (
 	vicconst "github.com/vmware/vic/lib/constants"
 	"github.com/vmware/vic/pkg/dio"
 	viclog "github.com/vmware/vic/pkg/log"
+	"github.com/vmware/vic/pkg/retry"
 	"github.com/vmware/vic/pkg/trace"
 
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/constants"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
+	"github.com/vmware/vic/lib/apiservers/engine/errors"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -91,18 +93,10 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	op.Infof("Provider config = %#v", config)
 
 	plClient := vicproxy.NewPortLayerClient(config.PortlayerAddr)
-	systemProxy := vicproxy.NewSystemProxy(plClient)
-	up := false
-	for i := 0; i < 30; i++ {
-		if systemProxy.PingPortlayer(context.Background()) {
-			up = true
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
 
-	if !up {
-		msg := "VicProvider timed out waiting for portlayer ping"
+	op.Infof("** Wait for VCH servers to start")
+	if !waitForVCH(op, plClient, config.PersonaAddr) {
+		msg := "VicProvider timed out waiting for VCH's persona and portlayer servers"
 		op.Errorf(msg)
 		return nil, fmt.Errorf(msg)
 	}
@@ -130,6 +124,43 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	op.Infof("** ready to go")
 
 	return &p, nil
+}
+
+func waitForVCH(op trace.Operation, plClient *client.PortLayer, personaAddr string) bool {
+	backoffConf := retry.NewBackoffConfig()
+	backoffConf.MaxInterval = 2 * time.Second
+	backoffConf.InitialInterval = 500 * time.Millisecond
+
+	// Wait for portlayer to start up
+	systemProxy := vicproxy.NewSystemProxy(plClient)
+
+	opWaitForPortlayer := func() error {
+		op.Infof("** Checking portlayer server is running")
+		if !systemProxy.PingPortlayer(context.Background()) {
+			return errors.ServerNotReadyError{Name: "Portlayer"}
+		}
+		return nil
+	}
+	if err := retry.DoWithConfig(opWaitForPortlayer, errors.IsServerNotReady, backoffConf); err != nil {
+		op.Errorf("Wait for portlayer to be ready failed")
+		return false
+	}
+
+	// Wait for persona to start up
+	dockerClient := NewVicDockerClient(personaAddr)
+	opWaitForPersona := func() error {
+		op.Infof("** Checking persona server is running")
+		if err := dockerClient.Ping(op); err != nil {
+			return errors.ServerNotReadyError{Name: "Persona"}
+		}
+		return nil
+	}
+	if err := retry.DoWithConfig(opWaitForPersona, errors.IsServerNotReady, backoffConf); err != nil {
+		op.Errorf("Wait for VIC docker server to be ready failed")
+		return false
+	}
+
+	return true
 }
 
 func initLogger() {
@@ -306,12 +337,12 @@ func (v *VicProvider) Capacity() v1.ResourceList {
 	//
 	//	return KubeResourcesFromVchInfo(info)
 	//} else {
-		// Return fake data
-		return v1.ResourceList{
-			"cpu":    resource.MustParse("20"),
-			"memory": resource.MustParse("100Gi"),
-			"pods":   resource.MustParse("20"),
-		}
+	// Return fake data
+	return v1.ResourceList{
+		"cpu":    resource.MustParse("20"),
+		"memory": resource.MustParse("100Gi"),
+		"pods":   resource.MustParse("20"),
+	}
 	//}
 }
 

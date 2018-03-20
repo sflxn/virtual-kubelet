@@ -50,6 +50,9 @@ type IsolationProxy interface {
 	AddLoggingToHandle(ctx context.Context, handle string) (string, error)
 	CommitHandle(ctx context.Context, handle, containerID string, waitTime int32) error
 
+	BindScope(ctx context.Context, handle string, name string) (string, interface{}, error)
+	UnbindScope(ctx context.Context, handle string, name string) (string, interface{}, error)
+
 	Handle(ctx context.Context, id, name string) (string, error)
 	SetState(ctx context.Context, handle, name, state string) (string, error)
 }
@@ -387,6 +390,57 @@ func (v *VicIsolationProxy) CommitHandle(ctx context.Context, handle, containerI
 	}
 
 	return nil
+}
+
+//TODO:  I don't think this function should be in here.
+// BindNetwork binds the handle to the scope and returns endpoints.  Caller of the function does not need
+// to interpret the return value.  In the event the caller want to unbind,
+func (v *VicIsolationProxy) BindScope(ctx context.Context, handle string, name string) (string, interface{}, error) {
+	op := trace.FromContext(ctx, "BindScope")
+	defer trace.End(trace.Begin(handle, op))
+
+	if v.client == nil {
+		return "", nil, errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	bindParams := scopes.NewBindContainerParamsWithContext(ctx).WithHandle(handle)
+	bindRes, err := v.client.Scopes.BindContainer(bindParams)
+	if err != nil {
+		switch err := err.(type) {
+		case *scopes.BindContainerNotFound:
+			return "", nil, errors.NotFoundError(name)
+		case *scopes.BindContainerInternalServerError:
+			return "", nil, errors.InternalServerError(err.Payload.Message)
+		default:
+			return "", nil, errors.InternalServerError(err.Error())
+		}
+	}
+
+	return bindRes.Payload.Handle, bindRes.Payload.Endpoints, nil
+}
+
+func (v *VicIsolationProxy) UnbindScope(ctx context.Context, handle string, name string) (string, interface{}, error) {
+	op := trace.FromContext(ctx, "UnbindScope")
+	defer trace.End(trace.Begin(handle, op))
+
+	if v.client == nil {
+		return "", nil, errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	unbindParams := scopes.NewUnbindContainerParamsWithContext(ctx).WithHandle(handle)
+	resp, err := v.client.Scopes.UnbindContainer(unbindParams)
+	if err != nil {
+		switch err := err.(type) {
+		case *scopes.UnbindContainerNotFound:
+			return "", nil, errors.NotFoundError(name)
+		case *scopes.UnbindContainerInternalServerError:
+			return "", nil, errors.InternalServerError(err.Payload.Message)
+		default:
+			return "", nil, errors.InternalServerError(err.Error())
+		}
+	}
+
+	return resp.Payload.Handle, resp.Payload.Endpoints, nil
 }
 
 // SetState adds the desire state of the isolation unit once the handle is commited.
