@@ -15,7 +15,6 @@
 package cache
 
 import (
-	"context"
 	"fmt"
 	"sync"
 
@@ -25,10 +24,10 @@ import (
 )
 
 type PodCache interface {
-	Get(ctx context.Context, namespace, name string) (*vicpod.VicPod, error)
-	GetAll(ctx context.Context) []*vicpod.VicPod
-	Add(ctx context.Context, name string, pod *vicpod.VicPod) error
-	Delete(ctx context.Context, name string)
+	Get(op trace.Operation, namespace, name string) (*vicpod.VicPod, error)
+	GetAll(op trace.Operation) []*vicpod.VicPod
+	Add(op trace.Operation, name string, pod *vicpod.VicPod) error
+	Delete(op trace.Operation, name string)
 }
 
 type VicPodCache struct {
@@ -44,16 +43,13 @@ func NewVicPodCache() PodCache {
 	return v
 }
 
-func (v *VicPodCache) Rehydrate(ctx context.Context) error {
+func (v *VicPodCache) Rehydrate(op trace.Operation) error {
 	return nil
 }
 
-func (v *VicPodCache) Get(ctx context.Context, namespace, name string) (*vicpod.VicPod, error) {
-	op := trace.FromContext(ctx, "Get")
+func (v *VicPodCache) Get(op trace.Operation, namespace, name string) (*vicpod.VicPod, error) {
 	defer trace.End(trace.Begin(name, op))
 
-	//vicName := vicpod.VicName(namespace, name)
-	//pod, ok := v.cache[vicName]
 	pod, ok := v.cache[name]
 	if !ok {
 		err := fmt.Errorf("Pod %s not found in cache", name)
@@ -65,8 +61,7 @@ func (v *VicPodCache) Get(ctx context.Context, namespace, name string) (*vicpod.
 	return pod, nil
 }
 
-func (v *VicPodCache) GetAll(ctx context.Context) []*vicpod.VicPod {
-	op := trace.FromContext(ctx, "GetAll")
+func (v *VicPodCache) GetAll(op trace.Operation) []*vicpod.VicPod {
 	defer trace.End(trace.Begin("", op))
 	defer v.lock.Unlock()
 	v.lock.Lock()
@@ -80,8 +75,7 @@ func (v *VicPodCache) GetAll(ctx context.Context) []*vicpod.VicPod {
 	return list
 }
 
-func (v *VicPodCache) Add(ctx context.Context, name string, pod *vicpod.VicPod) error {
-	op := trace.FromContext(ctx, "Add")
+func (v *VicPodCache) Add(op trace.Operation, name string, pod *vicpod.VicPod) error {
 	defer trace.End(trace.Begin(name, op))
 	defer v.lock.Unlock()
 	v.lock.Lock()
@@ -98,8 +92,7 @@ func (v *VicPodCache) Add(ctx context.Context, name string, pod *vicpod.VicPod) 
 	return nil
 }
 
-func (v *VicPodCache) Delete(ctx context.Context, name string) {
-	op := trace.FromContext(ctx, "Delete")
+func (v *VicPodCache) Delete(op trace.Operation, name string) {
 	defer trace.End(trace.Begin(name, op))
 	defer v.lock.Unlock()
 	v.lock.Lock()

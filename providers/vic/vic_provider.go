@@ -235,7 +235,7 @@ func (v *VicProvider) GetPod(namespace, name string) (*v1.Pod, error) {
 	defer trace.End(trace.Begin(name, op))
 
 	// Look for the pod in our cache of running pods
-	vp, err := v.podCache.Get(op.Context, namespace, name)
+	vp, err := v.podCache.Get(op, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +307,7 @@ func (v *VicProvider) GetPods() ([]*v1.Pod, error) {
 	op := trace.NewOperation(context.Background(), "GetPods")
 	defer trace.End(trace.Begin("GetPods", op))
 
-	vps := v.podCache.GetAll(op.Context)
+	vps := v.podCache.GetAll(op)
 	allPods := make([]*v1.Pod, 0)
 	for _, vp := range vps {
 		allPods = append(allPods, vp.Pod)

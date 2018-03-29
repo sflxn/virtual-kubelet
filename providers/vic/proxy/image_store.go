@@ -16,7 +16,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -29,9 +28,9 @@ import (
 )
 
 type ImageStore interface {
-	Get(ctx context.Context, idOrRef, tag string, actuate bool) (*metadata.ImageConfig, error)
-	GetImages(ctx context.Context) []*metadata.ImageConfig
-	PullImage(ctx context.Context, image, tag, username, password string) error
+	Get(op trace.Operation, idOrRef, tag string, actuate bool) (*metadata.ImageConfig, error)
+	GetImages(op trace.Operation) []*metadata.ImageConfig
+	PullImage(op trace.Operation, image, tag, username, password string) error
 }
 
 type VicImageStore struct {
@@ -57,13 +56,12 @@ func NewImageStore(plClient *client.PortLayer, personaAddr, portlayerAddr string
 
 // Get returns an ImageConfig.  If the config is not cached, VicImageStore can request
 // imagec to pull the image if actuate is set to true.
-func (v *VicImageStore) Get(ctx context.Context, idOrRef, tag string, realize bool) (*metadata.ImageConfig, error) {
-	op := trace.FromContext(ctx, "Get - %s:%s", idOrRef, tag)
-	defer trace.End(trace.Begin("", op))
+func (v *VicImageStore) Get(op trace.Operation, idOrRef, tag string, realize bool) (*metadata.ImageConfig, error) {
+	defer trace.End(trace.Begin(fmt.Sprintf("Get - %s:%s", idOrRef, tag), op))
 
 	c, err := cache.ImageCache().Get(idOrRef)
 	if err != nil && realize {
-		err = v.PullImage(ctx, idOrRef, tag, "", "")
+		err = v.PullImage(op, idOrRef, tag, "", "")
 		if err == nil {
 			//TODO:  Find a better way to get update imageconfig instead of this hammer
 			err := cache.InitializeImageCache(v.client)
@@ -80,8 +78,7 @@ func (v *VicImageStore) Get(ctx context.Context, idOrRef, tag string, realize bo
 	return c, nil
 }
 
-func (v *VicImageStore) GetImages(ctx context.Context) []*metadata.ImageConfig {
-	op := trace.FromContext(ctx, "GetImages")
+func (v *VicImageStore) GetImages(op trace.Operation) []*metadata.ImageConfig {
 	defer trace.End(trace.Begin("", op))
 
 	return cache.ImageCache().GetImages()
@@ -90,9 +87,8 @@ func (v *VicImageStore) GetImages(ctx context.Context) []*metadata.ImageConfig {
 // PullImage pulls images using the docker persona.  It simply issues a pull rest call to the persona.
 // This lets the persona be the imagec server and keeps both the kubelet and docker persona up to date
 // when the kubelet pulls an image.
-func (v *VicImageStore) PullImage(ctx context.Context, image, tag, username, password string) error {
-	op := trace.FromContext(ctx, "Get - %s:%s", image, tag)
-	defer trace.End(trace.Begin("", op))
+func (v *VicImageStore) PullImage(op trace.Operation, image, tag, username, password string) error {
+	defer trace.End(trace.Begin(fmt.Sprintf("Get - %s:%s", image, tag), op))
 
 	pullClient := &http.Client{Timeout: 60 * time.Second}
 	var personaServer string
