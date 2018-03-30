@@ -36,7 +36,6 @@ import (
 
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
-	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/constants"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 	"github.com/vmware/vic/lib/apiservers/engine/errors"
 	"k8s.io/api/core/v1"
@@ -120,7 +119,7 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 	}
 
 	p.imageStore = i
-	p.isolationProxy = proxy.NewIsolationProxy(plClient, config.PortlayerAddr, i, p.podCache)
+	p.isolationProxy = proxy.NewIsolationProxy(plClient, config.PortlayerAddr, config.HostUUID, i, p.podCache)
 	op.Infof("** ready to go")
 
 	return &p, nil
@@ -165,10 +164,10 @@ func waitForVCH(op trace.Operation, plClient *client.PortLayer, personaAddr stri
 
 func initLogger() {
 	var logPath string
-	if constants.RunningInVCH {
-		logPath = path.Join("", vicconst.DefaultLogDir, LogFilename+".log")
-	} else {
+	if LocalInstance() {
 		logPath = path.Join("", ".", LogFilename+".log")
+	} else {
+		logPath = path.Join("", vicconst.DefaultLogDir, LogFilename+".log")
 	}
 
 	os.MkdirAll(vicconst.DefaultLogDir, 0755)

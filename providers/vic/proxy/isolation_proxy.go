@@ -57,6 +57,7 @@ type VicIsolationProxy struct {
 	imageStore    ImageStore
 	podCache      cache.PodCache
 	portlayerAddr string
+	hostUUID      string
 }
 
 type PortBinding struct {
@@ -92,17 +93,7 @@ type IsolationContainerConfig struct {
 	PortMap map[string]PortBinding
 }
 
-const (
-	// DefaultCPUs - the default number of container VM CPUs
-	DefaultCPUs   = 2
-	DefaultMemory = 512
-
-	DummyImage    = "f6e427c148a766d2d6c117d67359a0aa7d133b5bc05830a7ff6e8b64ff6b1d1d" //busybox
-	DummyLayerID  = "02d3847f0b0fb7acd4419040cc53febf91cb112db2451d9b27a245dee5b227c0" //busybox
-	DummyRepoName = "busybox"
-)
-
-func NewIsolationProxy(plClient *client.PortLayer, portlayerAddr string, imageStore ImageStore, podCache cache.PodCache) IsolationProxy {
+func NewIsolationProxy(plClient *client.PortLayer, portlayerAddr string, hostUUID string, imageStore ImageStore, podCache cache.PodCache) IsolationProxy {
 	if plClient == nil {
 		return nil
 	}
@@ -112,6 +103,7 @@ func NewIsolationProxy(plClient *client.PortLayer, portlayerAddr string, imageSt
 		imageStore:    imageStore,
 		podCache:      podCache,
 		portlayerAddr: portlayerAddr,
+		hostUUID:      hostUUID,
 	}
 }
 
@@ -124,22 +116,22 @@ func (v *VicIsolationProxy) CreateHandle(op trace.Operation) (string, string, er
 
 	// Call the Exec port layer to create the container
 	var err error
-	var host string
-	if constants.RunningInVCH {
-		host, err = sys.UUID()
+	var hostUUID string
+	if v.hostUUID != "" {
+		hostUUID = v.hostUUID
 	} else {
-		host = constants.HostUUID
-		err = nil
+		hostUUID, err = sys.UUID()
 	}
+
 	if err != nil {
 		return "", "", errors.InternalServerError("ContainerProxy.CreateContainerHandle got unexpected error getting VCH UUID")
 	}
 
-	plCreateParams := initIsolationConfig(op, "", DummyRepoName, DummyImage, DummyLayerID, host)
+	plCreateParams := initIsolationConfig(op, "", constants.DummyRepoName, constants.DummyImage, constants.DummyLayerID, hostUUID)
 	createResults, err := v.client.Containers.Create(plCreateParams)
 	if err != nil {
 		if _, ok := err.(*containers.CreateNotFound); ok {
-			cerr := fmt.Errorf("No such image: %s", DummyImage)
+			cerr := fmt.Errorf("No such image: %s", constants.DummyImage)
 			op.Errorf("%s (%s)", cerr, err)
 			return "", "", errors.NotFoundError(cerr.Error())
 		}
@@ -185,18 +177,18 @@ func (v *VicIsolationProxy) AddImageToHandle(op trace.Operation, handle, deltaID
 	}
 
 	var err error
-	var host string
-	if constants.RunningInVCH {
-		host, err = sys.UUID()
+	var hostUUID string
+	if v.hostUUID != "" {
+		hostUUID = v.hostUUID
 	} else {
-		host = constants.HostUUID
-		err = nil
+		hostUUID, err = sys.UUID()
 	}
+
 	if err != nil {
 		return "", errors.InternalServerError("ContainerProxy.AddImageToContainer got unexpected error getting VCH UUID")
 	}
 
-	response, err := v.client.Storage.ImageJoin(storage.NewImageJoinParamsWithContext(op).WithStoreName(host).WithID(layerID).
+	response, err := v.client.Storage.ImageJoin(storage.NewImageJoinParamsWithContext(op).WithStoreName(hostUUID).WithID(layerID).
 		WithConfig(&models.ImageJoinConfig{
 			Handle:   handle,
 			DeltaID:  deltaID,
@@ -519,8 +511,8 @@ func IsolationContainerConfigToTask(op trace.Operation, id, layerID string, ic I
 func initIsolationConfig(op trace.Operation, name, repoName, imageID, layerID, imageStore string) *containers.CreateParams {
 	config := &models.ContainerCreateConfig{}
 
-	config.NumCpus = DefaultCPUs
-	config.MemoryMB = DefaultMemory
+	config.NumCpus = constants.DefaultCPUs
+	config.MemoryMB = constants.DefaultMemory
 
 	// Layer/vmdk to use
 	config.Layer = layerID
@@ -541,7 +533,7 @@ func initIsolationConfig(op trace.Operation, name, repoName, imageID, layerID, i
 	config.NetworkDisabled = true
 
 	// hostname
-	config.Hostname = "test-kubelet"
+	config.Hostname = constants.HostName
 	//// domainname - https://github.com/moby/moby/issues/27067
 	//config.Domainname = cc.Config.Domainname
 
