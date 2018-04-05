@@ -24,7 +24,9 @@ import (
 	"golang.org/x/net/context"
 
 	log "github.com/Sirupsen/logrus"
+	"github.com/kr/pretty"
 
+	"github.com/vmware/vic/lib/apiservers/engine/errors"
 	vicproxy "github.com/vmware/vic/lib/apiservers/engine/proxy"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/apiservers/portlayer/models"
@@ -37,7 +39,8 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
-	"github.com/vmware/vic/lib/apiservers/engine/errors"
+	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/utils"
+
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -200,7 +203,7 @@ func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 	op := trace.NewOperation(context.Background(), "CreatePod - %s", pod.Name)
 	defer trace.End(trace.Begin(pod.Name, op))
 
-	op.Infof("%s's pod spec = %#v", pod.Name, pod.Spec)
+	op.Infof("Creating %s's pod spec = %#v", pod.Name, pod.Spec)
 
 	pc := NewPodCreator(v.client, v.imageStore, v.isolationProxy, v.podCache, v.config.PersonaAddr, v.config.PortlayerAddr)
 	err := pc.CreatePod(op, pod, true)
@@ -225,7 +228,13 @@ func (v *VicProvider) UpdatePod(pod *v1.Pod) error {
 func (v *VicProvider) DeletePod(pod *v1.Pod) error {
 	op := trace.NewOperation(context.Background(), "DeletePod - %s", pod.Name)
 	defer trace.End(trace.Begin(pod.Name, op))
-	return nil
+
+	op.Infof("Deleting %s's pod spec = %#v", pod.Name, pod.Spec)
+
+	pd := NewPodDeleter(v.client, v.isolationProxy, v.podCache, v.config.PersonaAddr, v.config.PortlayerAddr)
+
+	err := pd.DeletePod(op, pod)
+	return err
 }
 
 // GetPod retrieves a pod by name from the provider (can be cached).
@@ -320,29 +329,34 @@ func (v *VicProvider) Capacity() v1.ResourceList {
 	op := trace.NewOperation(context.Background(), "VicProvider.Capacity")
 	defer trace.End(trace.Begin("", op))
 
-	//if constants.RunningInVCH {
-	//	if v.systemProxy == nil {
-	//		err := NilProxy("VicProvider.Capacity", "SystemProxy")
-	//		op.Error(err)
-	//
-	//		return v1.ResourceList{}
-	//	}
-	//
-	//	info, err := v.systemProxy.VCHInfo(context.Background())
-	//	if err != nil {
-	//		op.Errorf("VicProvider.Capacity failed to get vchinfo: %s", err.Error())
-	//		return v1.ResourceList{}
-	//	}
-	//
-	//	return KubeResourcesFromVchInfo(info)
-	//} else {
-	// Return fake data
+	if v.systemProxy == nil {
+		err := NilProxy("VicProvider.Capacity", "SystemProxy")
+		op.Error(err)
+		return v1.ResourceList{}
+	}
+	info, err := v.systemProxy.VCHInfo(context.Background())
+	if err != nil {
+		op.Errorf("VicProvider.Capacity failed to get VCHInfo: %s", err.Error())
+	}
+	op.Infof("VCH Config: %# +v\n", pretty.Formatter(info))
+
+	var containerCount = -1
+	running, paused, stopped, err := v.systemProxy.ContainerCount(context.Background())
+	if err == nil {
+		containerCount = running + paused + stopped
+	} else {
+		op.Errorf("VicProvider.Capacity failed to get Container Count: %s", err.Error())
+	}
+
+	op.Infof("Container count: %d", containerCount)
+
 	return v1.ResourceList{
 		"cpu":    resource.MustParse("20"),
 		"memory": resource.MustParse("100Gi"),
 		"pods":   resource.MustParse("20"),
 	}
-	//}
+
+	// return KubeResourcesFromVchInfo(op, info, int64(containerCount))
 }
 
 // NodeConditions returns a list of conditions (Ready, OutOfDisk, etc), which is polled periodically to update the node status
@@ -419,28 +433,31 @@ func (v *VicProvider) OperatingSystem() string {
 //------------------------------------
 
 // KubeResourcesFromVchInfo returns a K8s node resource list, given the VCHInfo
-func KubeResourcesFromVchInfo(info *models.VCHInfo) v1.ResourceList {
-	var nr v1.ResourceList
+func KubeResourcesFromVchInfo(op trace.Operation, info *models.VCHInfo, containerCount int64) v1.ResourceList {
+	nr := make(v1.ResourceList)
 
-	// translate CPU resources.  K8s wants cores.  We have virtual cores based on mhz.
-	cpuQ := resource.Quantity{}
-	cpuQ.Set(info.CPUMhz)
-	nr[v1.ResourceCPU] = cpuQ
+	if info != nil {
+		cores := utils.CpuFrequencyToCores(info.CPUMhz, "Mhz")
+		// translate CPU resources.  K8s wants cores.  We have virtual cores based on mhz.
+		cpuQ := resource.Quantity{}
+		cpuQ.Set(cores)
+		nr[v1.ResourceCPU] = cpuQ
 
-	// translate memory resources.  K8s wants bytes.
-	memQ := resource.Quantity{}
-	memQ.Set(info.Memory)
-	nr[v1.ResourceMemory] = memQ
+		memQstr := utils.MemsizeToBinaryString(info.Memory, "Mb")
+		// translate memory resources.  K8s wants bytes.
+		memQ, err := resource.ParseQuantity(memQstr)
+		if err == nil {
+			nr[v1.ResourceMemory] = memQ
+		} else {
+			op.Errorf("KubeResourcesFromVchInfo, cannot parse MEM quantity: %s, err: %s", memQstr, err)
+		}
+	}
 
-	// translate storage and nvida gpu info
-	q := resource.Quantity{}
-	q.Set(0)
-	nr[v1.ResourceStorage] = q
-	nr[v1.ResourceEphemeralStorage] = q
-	nr[v1.ResourceNvidiaGPU] = q
-
-	// Get pod count
-	nr[v1.ResourcePods] = q
+	if containerCount > -1 {
+		containerCountQ := resource.Quantity{}
+		containerCountQ.Set(containerCount)
+		nr[v1.ResourcePods] = containerCountQ
+	}
 
 	return nr
 }
