@@ -112,7 +112,7 @@ func NewIsolationProxy(plClient *client.PortLayer, portlayerAddr string, hostUUI
 }
 
 func (v *VicIsolationProxy) CreateHandle(op trace.Operation) (string, string, error) {
-	defer trace.End(trace.Begin("", op))
+	defer trace.End(trace.Begin("CreateHandle", op))
 
 	if v.client == nil {
 		return "", "", errors.NillPortlayerClientError("IsolationProxy")
@@ -430,7 +430,7 @@ func (v *VicIsolationProxy) UnbindScope(op trace.Operation, handle string, name 
 //
 //   returns handle string and error
 func (v *VicIsolationProxy) SetState(op trace.Operation, handle, name, state string) (string, error) {
-	defer trace.End(trace.Begin("name", op))
+	defer trace.End(trace.Begin(handle, op))
 
 	if v.client == nil {
 		return "", errors.NillPortlayerClientError("IsolationProxy")
@@ -452,7 +452,7 @@ func (v *VicIsolationProxy) SetState(op trace.Operation, handle, name, state str
 }
 
 func (v *VicIsolationProxy) State(op trace.Operation, id, name string) (string, error) {
-	defer trace.End(trace.Begin(""))
+	defer trace.End(trace.Begin(id, op))
 
 	if v.client == nil {
 		return "", errors.NillPortlayerClientError("IsolationProxy")
@@ -475,7 +475,7 @@ func (v *VicIsolationProxy) State(op trace.Operation, id, name string) (string, 
 }
 
 func (v *VicIsolationProxy) Remove(op trace.Operation, id string, force bool) error {
-	defer trace.End(trace.Begin("", op))
+	defer trace.End(trace.Begin(id, op))
 
 	if v.client == nil {
 		return errors.NillPortlayerClientError("IsolationProxy")
