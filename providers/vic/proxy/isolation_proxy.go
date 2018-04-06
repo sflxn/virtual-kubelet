@@ -31,6 +31,8 @@ import (
 
 	"github.com/docker/docker/api/types/strslice"
 
+	"time"
+
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/constants"
 	"github.com/vmware/vic/pkg/vsphere/sys"
@@ -44,12 +46,14 @@ type IsolationProxy interface {
 	AddInteractionToHandle(op trace.Operation, handle string) (string, error)
 	AddLoggingToHandle(op trace.Operation, handle string) (string, error)
 	CommitHandle(op trace.Operation, handle, containerID string, waitTime int32) error
+	SetState(op trace.Operation, handle, name, state string) (string, error)
 
 	BindScope(op trace.Operation, handle string, name string) (string, interface{}, error)
 	UnbindScope(op trace.Operation, handle string, name string) (string, interface{}, error)
 
 	Handle(op trace.Operation, id, name string) (string, error)
-	SetState(op trace.Operation, handle, name, state string) (string, error)
+	State(op trace.Operation, id, name string) (string, error)
+	Remove(op trace.Operation, id string, force bool) error
 }
 
 type VicIsolationProxy struct {
@@ -111,7 +115,7 @@ func (v *VicIsolationProxy) CreateHandle(op trace.Operation) (string, string, er
 	defer trace.End(trace.Begin("", op))
 
 	if v.client == nil {
-		return "", "", errors.NillPortlayerClientError("ContainerProxy")
+		return "", "", errors.NillPortlayerClientError("IsolationProxy")
 	}
 
 	// Call the Exec port layer to create the container
@@ -124,7 +128,7 @@ func (v *VicIsolationProxy) CreateHandle(op trace.Operation) (string, string, er
 	}
 
 	if err != nil {
-		return "", "", errors.InternalServerError("ContainerProxy.CreateContainerHandle got unexpected error getting VCH UUID")
+		return "", "", errors.InternalServerError("IsolationProxy.CreateContainerHandle got unexpected error getting VCH UUID")
 	}
 
 	plCreateParams := initIsolationConfig(op, "", constants.DummyRepoName, constants.DummyImage, constants.DummyLayerID, hostUUID)
@@ -152,7 +156,7 @@ func (v *VicIsolationProxy) CreateHandle(op trace.Operation) (string, string, er
 //	(handle string, error)
 func (v *VicIsolationProxy) Handle(op trace.Operation, id, name string) (string, error) {
 	if v.client == nil {
-		return "", errors.NillPortlayerClientError("ContainerProxy")
+		return "", errors.NillPortlayerClientError("IsolationProxy")
 	}
 
 	resp, err := v.client.Containers.Get(containers.NewGetParamsWithContext(op).WithID(id))
@@ -173,7 +177,7 @@ func (v *VicIsolationProxy) AddImageToHandle(op trace.Operation, handle, deltaID
 	defer trace.End(trace.Begin(handle, op))
 
 	if v.client == nil {
-		return "", errors.InternalServerError("ContainerProxy.AddImageToContainer failed to get the portlayer client")
+		return "", errors.InternalServerError("IsolationProxy.AddImageToContainer failed to get the portlayer client")
 	}
 
 	var err error
@@ -185,7 +189,7 @@ func (v *VicIsolationProxy) AddImageToHandle(op trace.Operation, handle, deltaID
 	}
 
 	if err != nil {
-		return "", errors.InternalServerError("ContainerProxy.AddImageToContainer got unexpected error getting VCH UUID")
+		return "", errors.InternalServerError("IsolationProxy.AddImageToContainer got unexpected error getting VCH UUID")
 	}
 
 	response, err := v.client.Storage.ImageJoin(storage.NewImageJoinParamsWithContext(op).WithStoreName(hostUUID).WithID(layerID).
@@ -268,7 +272,7 @@ func (v *VicIsolationProxy) AddHandleToScope(op trace.Operation, handle string, 
 			}))
 
 		if err != nil {
-			op.Errorf("ContainerProxy.AddContainerToScope: Scopes error: %s", err.Error())
+			op.Errorf("IsolationProxy.AddContainerToScope: Scopes error: %s", err.Error())
 			return handle, errors.InternalServerError(err.Error())
 		}
 
@@ -445,6 +449,47 @@ func (v *VicIsolationProxy) SetState(op trace.Operation, handle, name, state str
 	}
 
 	return resp.Payload, nil
+}
+
+func (v *VicIsolationProxy) State(op trace.Operation, id, name string) (string, error) {
+	defer trace.End(trace.Begin(""))
+
+	if v.client == nil {
+		return "", errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	results, err := v.client.Containers.GetContainerInfo(containers.NewGetContainerInfoParamsWithContext(op).WithID(id))
+	if err != nil {
+		switch err := err.(type) {
+		case *containers.GetContainerInfoNotFound:
+			return "", errors.NotFoundError(name)
+		case *containers.GetContainerInfoInternalServerError:
+			return "", errors.InternalServerError(err.Payload.Message)
+		default:
+			return "", errors.InternalServerError(fmt.Sprintf("Unknown error from the interaction port layer: %s", err))
+		}
+	}
+
+	state := results.Payload.ContainerConfig.State
+	return state, nil
+}
+
+func (v *VicIsolationProxy) Remove(op trace.Operation, id string, force bool) error {
+	defer trace.End(trace.Begin("", op))
+
+	if v.client == nil {
+		return errors.NillPortlayerClientError("IsolationProxy")
+	}
+
+	pForce := force
+	params := containers.NewContainerRemoveParamsWithContext(op).
+		WithID(id).
+		WithForce(&pForce).
+		WithTimeout(120 * time.Second)
+
+	removeOK, err := v.client.Containers.ContainerRemove(params)
+	op.Infof("ContainerRemove returned %# +v", removeOK)
+	return err
 }
 
 //------------------------------------
