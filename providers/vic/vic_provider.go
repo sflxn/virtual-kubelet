@@ -340,23 +340,7 @@ func (v *VicProvider) Capacity() v1.ResourceList {
 	}
 	op.Infof("VCH Config: %# +v\n", pretty.Formatter(info))
 
-	var containerCount = -1
-	running, paused, stopped, err := v.systemProxy.ContainerCount(context.Background())
-	if err == nil {
-		containerCount = running + paused + stopped
-	} else {
-		op.Errorf("VicProvider.Capacity failed to get Container Count: %s", err.Error())
-	}
-
-	op.Infof("Container count: %d", containerCount)
-
-	return v1.ResourceList{
-		"cpu":    resource.MustParse("20"),
-		"memory": resource.MustParse("100Gi"),
-		"pods":   resource.MustParse("20"),
-	}
-
-	// return KubeResourcesFromVchInfo(op, info, int64(containerCount))
+	return KubeResourcesFromVchInfo(op, info)
 }
 
 // NodeConditions returns a list of conditions (Ready, OutOfDisk, etc), which is polled periodically to update the node status
@@ -433,7 +417,7 @@ func (v *VicProvider) OperatingSystem() string {
 //------------------------------------
 
 // KubeResourcesFromVchInfo returns a K8s node resource list, given the VCHInfo
-func KubeResourcesFromVchInfo(op trace.Operation, info *models.VCHInfo, containerCount int64) v1.ResourceList {
+func KubeResourcesFromVchInfo(op trace.Operation, info *models.VCHInfo) v1.ResourceList {
 	nr := make(v1.ResourceList)
 
 	if info != nil {
@@ -453,15 +437,18 @@ func KubeResourcesFromVchInfo(op trace.Operation, info *models.VCHInfo, containe
 		}
 	}
 
-	if containerCount > -1 {
-		containerCountQ := resource.Quantity{}
-		containerCountQ.Set(containerCount)
-		nr[v1.ResourcePods] = containerCountQ
-	}
+	// Estimate the available pod count, based on memory
+	podCount := utils.MemsizeToMaxPodCount(info.Memory, "Mb")
 
+	containerCountQ := resource.Quantity{}
+	containerCountQ.Set(podCount)
+	nr[v1.ResourcePods] = containerCountQ
+
+	op.Infof("Capacity Resource Config: %# +v\n", pretty.Formatter(nr))
 	return nr
 }
 
 func NilProxy(caller, proxyName string) error {
+
 	return fmt.Errorf("%s: %s not valid", caller, proxyName)
 }

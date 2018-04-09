@@ -58,6 +58,10 @@ const (
 	FREQUENCYCUTOVER = 10
 )
 
+const (
+	MINPODSIZE = 2 * GIGABYTE
+)
+
 func MemsizeToBytesize(size int64, unit string) int64 {
 	u := strings.ToLower(unit)
 	var sizeInBytes int64
@@ -132,6 +136,13 @@ func MemsizeToBinaryString(size int64, unit string) string {
 	}
 
 	return res
+}
+
+func MemsizeToMaxPodCount(size int64, unit string) int64 {
+	sizeInBytes := MemsizeToBytesize(size, unit)
+
+	// Divide by minimum pod size
+	return sizeInBytes / MINPODSIZE
 }
 
 func FrequencyToHertzFrequency(size int64, unit string) int64 {
