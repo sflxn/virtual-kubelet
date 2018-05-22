@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 )
@@ -17,11 +18,13 @@ type ResourceManager struct {
 	sync.RWMutex
 	k8sClient kubernetes.Interface
 
-	pods         map[string]*v1.Pod
-	configMapRef map[string]int64
-	configMaps   map[string]*v1.ConfigMap
-	secretRef    map[string]int64
-	secrets      map[string]*v1.Secret
+	pods            map[string]*v1.Pod
+	configMapRef    map[string]int64
+	configMaps      map[string]*v1.ConfigMap
+	volumeMap       map[string]PodVolume
+	secretRef       map[string]int64
+	secrets         map[string]*v1.Secret
+	storageProvider map[string]*ProviderStorageClass
 }
 
 // NewResourceManager returns a ResourceManager with the internal maps initialized.
@@ -67,6 +70,10 @@ func NewResourceManager(k8sClient kubernetes.Interface) *ResourceManager {
 	}()
 
 	return &rm
+}
+
+func (rm *ResourceManager) Run(stop <-chan struct{}) {
+	wait.Until(rm.volumeSyncLoop(), podVolumeUpdateDuration, stop)
 }
 
 // SetPods clears the internal cache and populates it with the supplied pods.
