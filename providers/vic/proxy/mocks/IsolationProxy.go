@@ -2,6 +2,7 @@
 package mocks
 
 import mock "github.com/stretchr/testify/mock"
+import models "github.com/vmware/vic/lib/apiservers/portlayer/models"
 import proxy "github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 import trace "github.com/vmware/vic/pkg/trace"
 
@@ -196,6 +197,52 @@ func (_m *IsolationProxy) Handle(op trace.Operation, id string, name string) (st
 		r0 = rf(op, id, name)
 	} else {
 		r0 = ret.Get(0).(string)
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(trace.Operation, string, string) error); ok {
+		r1 = rf(op, id, name)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// NetworkConfigs provides a mock function with given fields: op, id, name
+func (_m *IsolationProxy) NetworkConfigs(op trace.Operation, id string, name string) ([]*models.EndpointConfig, error) {
+	ret := _m.Called(op, id, name)
+
+	var r0 []*models.EndpointConfig
+	if rf, ok := ret.Get(0).(func(trace.Operation, string, string) []*models.EndpointConfig); ok {
+		r0 = rf(op, id, name)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]*models.EndpointConfig)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(trace.Operation, string, string) error); ok {
+		r1 = rf(op, id, name)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// PodConfig provides a mock function with given fields: op, id, name
+func (_m *IsolationProxy) PodConfig(op trace.Operation, id string, name string) (*models.ContainerConfig, error) {
+	ret := _m.Called(op, id, name)
+
+	var r0 *models.ContainerConfig
+	if rf, ok := ret.Get(0).(func(trace.Operation, string, string) *models.ContainerConfig); ok {
+		r0 = rf(op, id, name)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*models.ContainerConfig)
+		}
 	}
 
 	var r1 error
