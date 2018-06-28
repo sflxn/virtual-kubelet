@@ -756,7 +756,7 @@
     "pkg/vsphere/session",
     "pkg/vsphere/sys"
   ]
-  revision = "24e7742b481d328dc0d5b68c992750b7aef4550d"
+  revision = "0fd01769dd5f4077763f3426a830709a9e986f1e"
 
 [[projects]]
   branch = "master"
