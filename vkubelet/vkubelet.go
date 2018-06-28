@@ -102,7 +102,7 @@ func New(nodeName, operatingSystem, namespace, kubeConfig, taint, provider, prov
 			return nil, err
 		}
 	case "vic":
-		p, err = vic.NewVicProvider(providerConfig, rm, nodeName, operatingSystem)
+		p, err = vic.NewVicProvider(providerConfig, rm, nodeName, operatingSystem, config)
 		if err != nil {
 			return nil, err
 		}

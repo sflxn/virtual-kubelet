@@ -33,6 +33,7 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 )
 
 type VicProvider struct {
@@ -46,7 +47,8 @@ type VicProvider struct {
 	client         *client.PortLayer
 	imageStore     proxy.ImageStore
 	isolationProxy proxy.IsolationProxy
-	systemProxy    vicproxy.VicSystemProxy
+	systemProxy    vicproxy.SystemProxy
+	clientConfig   *rest.Config
 }
 
 const (
@@ -75,7 +77,7 @@ var (
 	portlayerUp chan struct{}
 )
 
-func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string) (*VicProvider, error) {
+func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, operatingSystem string, rc *rest.Config) (*VicProvider, error) {
 	initLogger()
 
 	op := trace.NewOperation(context.Background(), "VicProvider creation: config - %s", configFile)
@@ -109,6 +111,7 @@ func NewVicProvider(configFile string, rm *manager.ResourceManager, nodeName, op
 		client:          plClient,
 		resourceManager: rm,
 		systemProxy:     vicproxy.NewSystemProxy(plClient),
+		clientConfig:    rc,
 	}
 
 	p.imageStore = i
@@ -196,7 +199,7 @@ func (v *VicProvider) CreatePod(pod *v1.Pod) error {
 
 	op.Debugf("Creating %s's pod = %# +v", pod.Name, pretty.Formatter(pod))
 
-	pc, err := operations.NewPodCreator(v.client, v.imageStore, v.isolationProxy, v.podCache, v.config.PersonaAddr, v.config.PortlayerAddr)
+	pc, err := operations.NewPodCreator(v.client, v.imageStore, v.isolationProxy, v.podCache, v.config.PersonaAddr, v.config.PortlayerAddr, v.clientConfig, v.resourceManager)
 	if err != nil {
 		return err
 	}

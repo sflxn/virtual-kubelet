@@ -1,24 +1,28 @@
 package operations
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/kr/pretty"
+	"github.com/virtual-kubelet/virtual-kubelet/manager"
 
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
 
 	vicerrors "github.com/vmware/vic/lib/apiservers/engine/errors"
+	vicproxy "github.com/vmware/vic/lib/apiservers/engine/proxy"
 	"github.com/vmware/vic/lib/apiservers/portlayer/client"
 	"github.com/vmware/vic/lib/metadata"
 	"github.com/vmware/vic/pkg/trace"
 
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 )
 
 type PodCreator interface {
@@ -26,12 +30,15 @@ type PodCreator interface {
 }
 
 type VicPodCreator struct {
-	client         *client.PortLayer
-	imageStore     proxy.ImageStore
-	isolationProxy proxy.IsolationProxy
-	podCache       cache.PodCache
-	personaAddr    string
-	portlayerAddr  string
+	client          *client.PortLayer
+	imageStore      proxy.ImageStore
+	isolationProxy  proxy.IsolationProxy
+	storageProxy	vicproxy.StorageProxy
+	podCache        cache.PodCache
+	personaAddr     string
+	portlayerAddr   string
+	clientConfig    *rest.Config
+	resourceManager *manager.ResourceManager
 }
 
 type VicPodCreatorError string
@@ -71,7 +78,7 @@ const (
 	PodCreatorInvalidArgsError     = VicPodCreatorError("Invalid arguments")
 )
 
-func NewPodCreator(client *client.PortLayer, imageStore proxy.ImageStore, isolationProxy proxy.IsolationProxy, podCache cache.PodCache, personaAddr string, portlayerAddr string) (PodCreator, error) {
+func NewPodCreator(client *client.PortLayer, imageStore proxy.ImageStore, isolationProxy proxy.IsolationProxy, podCache cache.PodCache, personaAddr string, portlayerAddr string, rc *rest.Config, rm *manager.ResourceManager) (PodCreator, error) {
 	if client == nil {
 		return nil, PodCreatorPortlayerClientError
 	} else if imageStore == nil {
@@ -83,12 +90,15 @@ func NewPodCreator(client *client.PortLayer, imageStore proxy.ImageStore, isolat
 	}
 
 	return &VicPodCreator{
-		client:         client,
-		imageStore:     imageStore,
-		podCache:       podCache,
-		personaAddr:    personaAddr,
-		portlayerAddr:  portlayerAddr,
-		isolationProxy: isolationProxy,
+		client:          client,
+		imageStore:      imageStore,
+		podCache:        podCache,
+		personaAddr:     personaAddr,
+		portlayerAddr:   portlayerAddr,
+		storageProxy:	 vicproxy.NewStorageProxy(client),
+		isolationProxy:  isolationProxy,
+		clientConfig:    rc,
+		resourceManager: rm,
 	}, nil
 }
 
@@ -117,8 +127,15 @@ func (v *VicPodCreator) CreatePod(op trace.Operation, pod *v1.Pod, start bool) e
 		return err
 	}
 
+	// Create the secrets volume prior to creating the pod
+	secretsVols, err := v.handleSecrets(op, pod)
+	if err != nil {
+		op.Errorf("PodCreator failed to create a secrets volume for pod %s: %s", pod.Name, err.Error())
+		return err
+	}
+
 	// Transform kube container config to docker create config
-	id, err := v.createPod(op, pod, start)
+	id, err := v.createPod(op, pod, start, secretsVols)
 	if err != nil {
 		op.Errorf("pod_creator failed to create pod: %s", err.Error())
 		return err
@@ -205,6 +222,46 @@ func (v *VicPodCreator) pullPodContainers(op trace.Operation, pod *v1.Pod) error
 	return nil
 }
 
+// handleSecrets creates vmdk volumes with the secrets saved as files on those vmdk volumes.  The volume
+//	should later be mounted once the pod vm is started.  If the volume fails to get created, the pod
+//	creation should cease to continue further.
+//
+// arguments:
+//		op		operation trace logger
+//		pod		pod spec
+func (v *VicPodCreator) handleSecrets(op trace.Operation, pod *v1.Pod) ([]string, error) {
+	secretsVols := make([]string, 0)
+
+	for _, vol := range pod.Spec.Volumes {
+		if vol.VolumeSource.Secret != nil {
+			secret, err := v.resourceManager.GetSecret(vol.Secret.SecretName, pod.Namespace)
+			if err != nil {
+				op.Errorf("Found secrets volume %s, but failed to retrieve actual data: %s", err.Error())
+				continue
+			}
+
+			op.Infof("Found secrets volume %s: %# +v", vol.Name, pretty.Formatter(*secret))
+
+			secretsCreator := NewVicSecretsVolumeCreator(v.client)
+			err = secretsCreator.Create(op, secret.Name)
+			if err != nil {
+				op.Errorf("Failed to create a secrets volume %s while creating pod %s", secret.Name, pod.Name)
+				return []string{}, err
+			}
+
+			secretsVols = append(secretsVols, secret.Name)
+
+			for dataName, data := range secret.Data {
+				dataReader := bytes.NewReader(data)
+				size := len(data)
+				secretsCreator.UpdateSecret(op, dataName, dataReader, uint(size))
+			}
+		}
+	}
+
+	return secretsVols, nil
+}
+
 // createPod creates a pod using the VIC portlayer.  Images can be pulled serially if not already present.
 //
 // arguments:
@@ -213,7 +270,7 @@ func (v *VicPodCreator) pullPodContainers(op trace.Operation, pod *v1.Pod) error
 //		start	start the pod after creation
 // returns:
 // 		(pod id, error)
-func (v *VicPodCreator) createPod(op trace.Operation, pod *v1.Pod, start bool) (string, error) {
+func (v *VicPodCreator) createPod(op trace.Operation, pod *v1.Pod, start bool, secretsVols []string) (string, error) {
 	defer trace.End(trace.Begin("", op))
 
 	if pod == nil || pod.Spec.Containers == nil {
@@ -290,6 +347,12 @@ func (v *VicPodCreator) createPod(op trace.Operation, pod *v1.Pod, start bool) (
 		return "", err
 	}
 
+	// Join the secrets volume
+	for _, vol := range secretsVols {
+		flags := make(map[string]string)
+		h, err = v.storageProxy.VolumeJoin(op, h, vol, "/"+vol, flags)
+	}
+
 	err = v.isolationProxy.CommitHandle(op, h, id, -1)
 	if err != nil {
 		return "", err
@@ -348,8 +411,6 @@ func IsolationContainerConfigFromKubeContainer(op trace.Operation, cSpec *v1.Con
 	}
 
 	op.Debugf("config = %#v", config)
-
-	// TODO:  Cache the container (so that they are shared with the persona)
 
 	return config, nil
 }
@@ -412,6 +473,12 @@ func setPathFromImageConfig(env []string, imgEnv []string) []string {
 
 	return env
 }
+
+// Injects the needed certs and client config information into the pod.  This should only be done on
+// pods that actually need to access the api servers, such as volume plugins or network plugins
+//func injectClientConfig(env []string) []string {
+//
+//}
 
 func setResourceFromKubeSpec(op trace.Operation, config *proxy.IsolationContainerConfig, cSpec *v1.Container) error {
 	if config == nil {
