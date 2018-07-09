@@ -1,15 +1,14 @@
 package operations
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/kr/pretty"
-	"github.com/virtual-kubelet/virtual-kubelet/manager"
 
+	"github.com/virtual-kubelet/virtual-kubelet/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/cache"
 	vicpod "github.com/virtual-kubelet/virtual-kubelet/providers/vic/pod"
 	"github.com/virtual-kubelet/virtual-kubelet/providers/vic/proxy"
@@ -33,7 +32,7 @@ type VicPodCreator struct {
 	client          *client.PortLayer
 	imageStore      proxy.ImageStore
 	isolationProxy  proxy.IsolationProxy
-	storageProxy	vicproxy.StorageProxy
+	storageProxy    vicproxy.StorageProxy
 	podCache        cache.PodCache
 	personaAddr     string
 	portlayerAddr   string
@@ -95,7 +94,7 @@ func NewPodCreator(client *client.PortLayer, imageStore proxy.ImageStore, isolat
 		podCache:        podCache,
 		personaAddr:     personaAddr,
 		portlayerAddr:   portlayerAddr,
-		storageProxy:	 vicproxy.NewStorageProxy(client),
+		storageProxy:    vicproxy.NewStorageProxy(client),
 		isolationProxy:  isolationProxy,
 		clientConfig:    rc,
 		resourceManager: rm,
@@ -128,7 +127,8 @@ func (v *VicPodCreator) CreatePod(op trace.Operation, pod *v1.Pod, start bool) e
 	}
 
 	// Create the secrets volume prior to creating the pod
-	secretsVols, err := v.handleSecrets(op, pod)
+	secretsCreator := NewVicSecretsVolumeCreator(v.client)
+	secretsVols, err := secretsCreator.ProcessSecretsVolumes(op, pod, v.resourceManager)
 	if err != nil {
 		op.Errorf("PodCreator failed to create a secrets volume for pod %s: %s", pod.Name, err.Error())
 		return err
@@ -222,46 +222,6 @@ func (v *VicPodCreator) pullPodContainers(op trace.Operation, pod *v1.Pod) error
 	return nil
 }
 
-// handleSecrets creates vmdk volumes with the secrets saved as files on those vmdk volumes.  The volume
-//	should later be mounted once the pod vm is started.  If the volume fails to get created, the pod
-//	creation should cease to continue further.
-//
-// arguments:
-//		op		operation trace logger
-//		pod		pod spec
-func (v *VicPodCreator) handleSecrets(op trace.Operation, pod *v1.Pod) ([]string, error) {
-	secretsVols := make([]string, 0)
-
-	for _, vol := range pod.Spec.Volumes {
-		if vol.VolumeSource.Secret != nil {
-			secret, err := v.resourceManager.GetSecret(vol.Secret.SecretName, pod.Namespace)
-			if err != nil {
-				op.Errorf("Found secrets volume %s, but failed to retrieve actual data: %s", err.Error())
-				continue
-			}
-
-			op.Infof("Found secrets volume %s: %# +v", vol.Name, pretty.Formatter(*secret))
-
-			secretsCreator := NewVicSecretsVolumeCreator(v.client)
-			err = secretsCreator.Create(op, secret.Name)
-			if err != nil {
-				op.Errorf("Failed to create a secrets volume %s while creating pod %s", secret.Name, pod.Name)
-				return []string{}, err
-			}
-
-			secretsVols = append(secretsVols, secret.Name)
-
-			for dataName, data := range secret.Data {
-				dataReader := bytes.NewReader(data)
-				size := len(data)
-				secretsCreator.UpdateSecret(op, dataName, dataReader, uint(size))
-			}
-		}
-	}
-
-	return secretsVols, nil
-}
-
 // createPod creates a pod using the VIC portlayer.  Images can be pulled serially if not already present.
 //
 // arguments:
@@ -270,7 +230,7 @@ func (v *VicPodCreator) handleSecrets(op trace.Operation, pod *v1.Pod) ([]string
 //		start	start the pod after creation
 // returns:
 // 		(pod id, error)
-func (v *VicPodCreator) createPod(op trace.Operation, pod *v1.Pod, start bool, secretsVols []string) (string, error) {
+func (v *VicPodCreator) createPod(op trace.Operation, pod *v1.Pod, start bool, secretsVols map[string]string) (string, error) {
 	defer trace.End(trace.Begin("", op))
 
 	if pod == nil || pod.Spec.Containers == nil {
@@ -348,9 +308,13 @@ func (v *VicPodCreator) createPod(op trace.Operation, pod *v1.Pod, start bool, s
 	}
 
 	// Join the secrets volume
-	for _, vol := range secretsVols {
+	for vol, dest := range secretsVols {
 		flags := make(map[string]string)
-		h, err = v.storageProxy.VolumeJoin(op, h, vol, "/"+vol, flags)
+		h, err = v.storageProxy.VolumeJoin(op, h, vol, dest, flags)
+		if err != nil {
+			//TODO: Review whether we should bail if we can't join a secrets volume
+			return "", err
+		}
 	}
 
 	err = v.isolationProxy.CommitHandle(op, h, id, -1)
